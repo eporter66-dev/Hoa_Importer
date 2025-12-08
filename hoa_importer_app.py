@@ -10,9 +10,43 @@ from io import StringIO
 # ----------------------------------------------------
 # QUICKBASE CONFIG
 # ----------------------------------------------------
-QB_REALM = "rotoloconsultants.quickbase.com"
-QB_TABLE_ID = "bu9vgbhdg"
-QB_USER_TOKEN = "b9qytm_ppjb_0_d9gvuvvsa8iecbxbyc9mciwq6m5"
+QB_REALM = st.secrets["QB_REALM"]
+QB_TABLE_ID = st.secrets["QB_TABLE_ID"]
+QB_USER_TOKEN = st.secrets["QB_USER_TOKEN"]
+
+
+def extract_table_rows(raw_text):
+    """
+    Extracts valid directory rows from messy UI-heavy text files.
+    Accepts files like the user-uploaded example.
+    """
+
+    lines = raw_text.splitlines()
+    rows = []
+
+    for line in lines:
+        # Remove garbage formatting elements
+        cleaned = line.replace("\t", " ").strip()
+
+        # Skip empty or irrelevant lines
+        if not cleaned:
+            continue
+        if cleaned.startswith(("Cookie", "Skip to", "I'm interested", "Cart", "Login",
+                               "Search", "Keyword", "About", "ad", "UNITED STATES")):
+            continue
+        
+        # Basic detection of a real data row:
+        has_email = "@" in cleaned
+        has_zip = re.search(r"\b\d{5}(-\d{4})?\b", cleaned)
+        has_phone = re.search(r"\(\d{3}\)\s*\d{3}-\d{4}", cleaned)
+
+        if has_email and has_zip:
+            # Likely a valid row → split by two or more spaces
+            parts = re.split(r"\s{2,}", cleaned)
+            rows.append(parts)
+
+    return rows
+
 
 def parse_address(full_address):
     if not full_address:
@@ -177,18 +211,22 @@ uploaded_file = st.file_uploader("Upload HOA Directory File", type=["txt", "csv"
 
 if uploaded_file:
     raw_text = uploaded_file.read().decode("utf-8")
-    rows = []
-    reader = csv.reader(StringIO(raw_text))
 
-    for parts in reader:
+    # Step 1: Extract possible table rows from messy text
+    detected_rows = extract_table_rows(raw_text)
+
+    rows = []
+
+    # Step 2: Parse each detected row
+    for parts in detected_rows:
         parsed = parse_row(parts)
         if parsed:
             rows.append(parsed)
 
+    # Step 3: Validate results
     if rows:
         df = pd.DataFrame(rows)
         st.success(f"Parsed {len(df)} valid rows!")
-
         st.dataframe(df, use_container_width=True)
 
         # Download CSV
@@ -205,5 +243,7 @@ if uploaded_file:
             results_df = send_to_quickbase(df)
             st.write("### Quickbase Import Results")
             st.dataframe(results_df)
+
     else:
         st.error("No valid rows were detected in this file.")
+  
