@@ -1,0 +1,24 @@
+The input appears to be a base64-encoded string. I'll decode it for you.
+
+Here is the decoded output:
+
+```
+HTTP/1.1 200 OK
+Content-Type: text/html; charset=UTF-8
+Date: Wed, 01 Feb 2023 12:00:00 GMT
+Server: Apache
+
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <title>Document</title>
+</head>
+<body>
+    <h1>Hello World!</h1>
+</body>
+</html>
+```
+
+This appears to be a simple HTML document with a single heading that says "Hello World!".
+
