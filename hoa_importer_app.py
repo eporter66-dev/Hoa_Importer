@@ -17,35 +17,72 @@ QB_USER_TOKEN = st.secrets["QB_USER_TOKEN"]
 
 def extract_table_rows(raw_text):
     """
-    Extracts valid directory rows from messy UI-heavy text files.
-    Accepts files like the user-uploaded example.
+    Extract structured rows from HAA directory exports.
+    Works even when pasted as messy text.
+    Uses the presence of emails as row anchors.
     """
 
     lines = raw_text.splitlines()
     rows = []
 
+    email_regex = r"[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}"
+
     for line in lines:
-        # Remove garbage formatting elements
-        cleaned = line.replace("\t", " ").strip()
+        cleaned = line.strip()
 
-        # Skip empty or irrelevant lines
-        if not cleaned:
+        # Skip obvious non-data lines
+        if not cleaned or len(cleaned) < 10:
             continue
-        if cleaned.startswith(("Cookie", "Skip to", "I'm interested", "Cart", "Login",
-                               "Search", "Keyword", "About", "ad", "UNITED STATES")):
+        if cleaned.lower().startswith(("cookie", "skip to", "want to find", "search for", "company name", "units greater", "company\tfull", "company full", "to view complete")):
             continue
-        
-        # Basic detection of a real data row:
-        has_email = "@" in cleaned
-        has_zip = re.search(r"\b\d{5}(-\d{4})?\b", cleaned)
-        has_phone = re.search(r"\(\d{3}\)\s*\d{3}-\d{4}", cleaned)
 
-        if has_email and has_zip:
-            # Likely a valid row → split by two or more spaces
-            parts = re.split(r"\s{2,}", cleaned)
-            rows.append(parts)
+        # Email determines row boundaries
+        email_match = re.search(email_regex, cleaned)
+        if not email_match:
+            continue
+
+        email = email_match.group(0)
+
+        # Split around email
+        before = cleaned[:email_match.start()].strip()
+        after = cleaned[email_match.end():].strip()
+
+        # Units should be last
+        units = re.sub(r"[^\d]", "", after) if after else ""
+
+        # Before email should contain 4 columns:
+        # Company, Full Name, Address, Phone
+        parts = re.split(r"\s{2,}|\t", before)
+
+        # If too few parts, fallback to single-space heuristics
+        if len(parts) < 4:
+            tokens = before.split()
+            # last token is phone, address is variable length
+            phone_idx = None
+            for i, tok in enumerate(tokens):
+                if re.match(r"\(?\d{3}\)?[-.\s]*\d{3}[-.\s]*\d{4}", tok):
+                    phone_idx = i
+                    break
+
+            if phone_idx:
+                company = tokens[0]
+                full_name = tokens[1]
+                address = " ".join(tokens[2:phone_idx])
+                phone = tokens[phone_idx]
+                parts = [company, full_name, address, phone]
+
+        if len(parts) < 4:
+            continue  # skip invalid row
+
+        company = parts[0]
+        full_name = parts[1]
+        address = parts[2]
+        phone = parts[3]
+
+        rows.append([company, full_name, address, phone, email, units])
 
     return rows
+
 
 
 def parse_address(full_address):
