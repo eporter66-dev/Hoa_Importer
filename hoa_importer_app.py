@@ -15,6 +15,70 @@ QB_TABLE_ID = st.secrets["QB_TABLE_ID"]
 QB_USER_TOKEN = st.secrets["QB_USER_TOKEN"]
 
 
+def detect_association(raw_text):
+    """
+    Detect apartment/IFMA/CAI/BOMA/APPA associations from uploaded text.
+    Returns a standardized code.
+    """
+
+    text = raw_text.upper()
+
+    mapping = {
+        # Apartment Associations
+        "APARTMENT ASSOCIATION OF GREATER ORLANDO": "AAGO",
+        "FIRST COAST AA": "FCAA",
+        "FIRST COAST APARTMENT ASSOCIATION": "FCAA",
+        "CAPITAL CITY AA": "CCAA",
+        "NORTHWEST FLORIDA APARTMENT ASSOC": "NWFAA",
+        "MOBILE BAY AREA APARTMENT ASSOC": "MBAAA",
+        "GREATER GULF COAST APARTMENT ASSOCIATION": "GGCAA",
+        "BATON ROUGE APARTMENT ASSOCIATION": "BRAA",
+        "SHREVEPORT/BOSSIER AA": "SBAA",
+        "ACADIANA APARTMENT ASSOCATION": "AAA",
+        "HOUSTON APARTMENT ASSOCIATION": "HAA",
+        "APARTMENT ASSOCIATION OF GREATER MEMPHIS": "AAGM",
+        "GREATER NASHVILLE APARTMENT ASSOCIATION": "GNAA",
+        "UPPER STATE APARTMENT ASSOC": "USAA",
+        "GREATER COLUMBUS APARTMENT ASSOCIATION": "GCAA",
+
+        # IFMA
+        "GREATER ORLANDO CHAPTER OF IFMA": "IFMA-ORL",
+        "IFMA - JACKSONVILLE": "IFMA-JAX",
+        "SUNCOAST CHAPTER": "IFMA-SC",
+        "CENTRAL AL AND GULF COAST CHAPTER OF IFMA": "IFMA-ALGC",
+        "NEW ORLEANS CHAPTER OF IFMA": "IFMA-NO",
+        "BATON ROUGE CHAPTER OF IFMA": "IFMA-BR",
+        "MEMPHIS CHAPTER OF IFMA": "IFMA-MEM",
+        "NASHVILLE CHAPTER OF IFMA": "IFMA-NSH",
+
+        # CAI
+        "CAI NORTHEAST FLORIDA": "CAI-NEFL",
+        "NORTH GULF COAST CHAPTER": "CAI-NGC",
+        "LOUSIANA CHAPTER": "CAI-LA",
+        "TENNESSEE CHAPTER": "CAI-TN",
+
+        # BOMA
+        "HOUSTON BOMA": "BOMA-HOU",
+        "BOMA HOUSTON": "BOMA-HOU",
+        "BOMA NASHVILLE": "BOMA-NSH",
+
+        # APPA
+        "TAPPA": "TAPPA",
+        "MSAPPA": "MSAPPA",
+        "FLAPPA": "FLAPPA",
+
+        # TNLA
+        "TNLA": "TNLA",
+    }
+
+    for key, code in mapping.items():
+        if key in text:
+            return code
+
+    return "UNKNOWN"
+
+
+
 def extract_table_rows(raw_text):
     """
     Extract structured rows from HAA directory exports.
@@ -242,31 +306,38 @@ def send_to_quickbase(df: pd.DataFrame):
 # STREAMLIT UI
 # ----------------------------------------------------
 st.title("🏢 HOA Directory → Quickbase Import Tool")
-st.write("Upload a `.txt` or `.csv` directory export, and this tool will normalize it into a clean dataset ready for Quickbase.")
+st.write("Upload a `.txt` or `.csv` directory export, and this tool will normalize it and import into Quickbase.")
 
 uploaded_file = st.file_uploader("Upload HOA Directory File", type=["txt", "csv"])
 
 if uploaded_file:
+    # Read uploaded file
     raw_text = uploaded_file.read().decode("utf-8")
 
-    # Step 1: Extract possible table rows from messy text
+    # Detect association based on content
+    detected_assoc = detect_association(raw_text)
+    st.info(f"Detected Association: **{detected_assoc}**")
+
+    # Step 1: Extract rows from messy directory text
     detected_rows = extract_table_rows(raw_text)
 
     rows = []
 
-    # Step 2: Parse each detected row
+    # Step 2: Parse & normalize each row
     for parts in detected_rows:
         parsed = parse_row(parts)
         if parsed:
+            # Assign detected association to ALL rows
+            parsed["Association"] = detected_assoc
             rows.append(parsed)
 
-    # Step 3: Validate results
+    # Step 3: Display or error out
     if rows:
         df = pd.DataFrame(rows)
         st.success(f"Parsed {len(df)} valid rows!")
         st.dataframe(df, use_container_width=True)
 
-        # Download CSV
+        # Allow CSV download
         csv_data = df.to_csv(index=False).encode("utf-8")
         st.download_button(
             "⬇ Download Cleaned CSV",
@@ -275,7 +346,7 @@ if uploaded_file:
             "text/csv"
         )
 
-        # Send to Quickbase
+        # Import into Quickbase
         if st.button("📤 Import to Quickbase"):
             results_df = send_to_quickbase(df)
             st.write("### Quickbase Import Results")
@@ -283,4 +354,6 @@ if uploaded_file:
 
     else:
         st.error("No valid rows were detected in this file.")
+
+
   
