@@ -5,6 +5,7 @@ import csv
 import re
 import requests
 from io import StringIO
+from bs4 import BeautifulSoup
 
 
 # ----------------------------------------------------
@@ -79,102 +80,104 @@ def detect_association(raw_text):
 
 
 
-def extract_table_rows(raw_text):
+AAGO_COUNTIES = {
+    "OSCEOLA COUNTY": "OsceolaCounty",
+    "ORANGE COUNTY": "OrangeCounty",
+    "SEMINOLE COUNTY": "SeminoleCounty",
+    "LAKE COUNTY": "LakeCounty",
+    "VOLUSIA COUNTY": "VolusiaCounty"
+}
+
+
+def extract_table_rows(raw_text, detected_assoc):
     """
-    Extract structured rows from multiple directory formats (HAA, AAGO, others).
-    Supports:
-      - HAA-style rows with email anchors
-      - AAGO rows with NO email, but with phone + member profile URL
-      - Mixed whitespace formats
-      - Hidden phone numbers that require Selenium later
-    Returns rows as:
-      [company, contact_name, address, phone(or ""), email(or ""), units(or ""), url(or "")]
+    Extracts rows from directory exports.
+    Supports both AAGO list-style directories and HAA-style email-based directories.
     """
 
     lines = raw_text.splitlines()
     rows = []
 
+     # ---------------------------
+    # AAGO HTML-BASED EXTRACTION
+    # ---------------------------
+    if detected_assoc == "AAGO":
+
+        soup = BeautifulSoup(raw_text, "html.parser")
+
+        # Property boxes on AAGO pages often use a member card layout
+        cards = soup.select(".c-directory-block, .c-member, .c-directory-listing")
+
+        for card in cards:
+
+            # Community Name
+            name_tag = card.select_one("h2, h3, .c-member__name, .c-directory-block__name")
+            if not name_tag:
+                continue
+            name = name_tag.get_text(strip=True)
+
+            # Address lines
+            addr_tag = card.select_one(".c-member-badge, .c-directory-block__address")
+            if addr_tag:
+                address_text = addr_tag.get_text(" ", strip=True)
+            else:
+                address_text = ""
+
+            # Profile URL
+            link_tag = card.find("a", string=lambda x: x and "View Profile" in x)
+            url = ""
+            if link_tag and link_tag.get("href"):
+                href = link_tag["href"]
+                # Normalize path into full absolute URL
+                if href.startswith("/"):
+                    url = f"https://www.aago.org{href}"
+                else:
+                    url = f"https://www.aago.org/{href}"
+
+            street, city, state, zipcode = parse_address(address_text)
+
+            rows.append([name, street, f"{city} {state} {zipcode}", url])
+
+        return rows
+
+    # --------------------------------------
+    # CASE 2: HAA / GENERIC EMAIL-BASED DIRECTORY
+    # --------------------------------------
+
     email_regex = r"[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}"
-    phone_regex = r"\(?\d{3}\)?[-.\s]*\d{3}[-.\s]*\d{4}"
-    url_regex = r"https?://\S+"
 
     for line in lines:
         cleaned = line.strip()
-        low = cleaned.lower()
 
-        # Skip obvious junk/header lines
-        if not cleaned or len(cleaned) < 6:
+        # Skip non-data noise
+        if not cleaned or len(cleaned) < 10:
             continue
-        if low.startswith(("cookie", "skip to", "want to find", "search for",
-                           "company name", "units greater", "company\tfull",
-                           "company full", "to view complete", "member login",
-                           "cart", "home", "directory")):
+        if cleaned.lower().startswith((
+            "cookie", "skip to", "want to find", "search for",
+            "company name", "units greater", "company\tfull",
+            "company full", "to view complete"
+        )):
             continue
 
-        # ========== CASE 1: HAA FORMAT (EMAIL ANCHOR) ==========
         email_match = re.search(email_regex, cleaned)
-
-        if email_match:
-            email = email_match.group(0)
-
-            # Split around email
-            before = cleaned[:email_match.start()].strip()
-            after = cleaned[email_match.end():].strip()
-
-            units = re.sub(r"[^\d]", "", after) if after else ""
-            parts = re.split(r"\s{2,}|\t", before)
-
-            # Fallback parsing
-            if len(parts) < 4:
-                tokens = before.split()
-                phone_idx = None
-                for i, tok in enumerate(tokens):
-                    if re.match(phone_regex, tok):
-                        phone_idx = i
-                        break
-                if phone_idx:
-                    company = tokens[0]
-                    full_name = tokens[1]
-                    address = " ".join(tokens[2:phone_idx])
-                    phone = tokens[phone_idx]
-                else:
-                    # skip if too messy
-                    continue
-            else:
-                company, full_name, address, phone = parts[:4]
-
-            rows.append([company, full_name, address, phone, email, units, ""])
-            continue  # move to next line
-
-        # ========== CASE 2: AAGO FORMAT (NO EMAIL, HAS URL + PHONE HIDDEN) ==========
-        url_match = re.search(url_regex, cleaned)
-        phone_match = re.search(phone_regex, cleaned)  # may not exist visually
-
-        if url_match:
-            url = url_match.group(0)
-            phone = phone_match.group(0) if phone_match else ""
-
-            # Remove URL + phone from text, leaving company + contact + address
-            text_wo_url = cleaned.replace(url, "").strip()
-            if phone:
-                text_wo_url = text_wo_url.replace(phone, "").strip()
-
-            parts = re.split(r"\s{2,}|\t", text_wo_url)
-
-            # Fallback split
-            tokens = text_wo_url.split()
-            if len(tokens) >= 3:
-                company = tokens[0]
-                full_name = tokens[1]
-                address = " ".join(tokens[2:])
-            else:
-                continue
-
-            rows.append([company, full_name, address, phone, "", "", url])
+        if not email_match:
             continue
 
-        # ========== OTHERWISE: Not a usable row ==========
-        continue
+        email = email_match.group(0)
+        before = cleaned[:email_match.start()].strip()
+        after = cleaned[email_match.end():].strip()
+
+        units = re.sub(r"[^\d]", "", after) if after else ""
+
+        parts = re.split(r"\s{2,}|\t", before)
+
+        if len(parts) >= 4:
+            company = parts[0]
+            full_name = parts[1]
+            address = parts[2]
+            phone = parts[3]
+
+            rows.append([company, full_name, address, phone, email, units])
 
     return rows
 
@@ -217,46 +220,86 @@ def clean_units(value):
 # MAIN ROW PARSER (Format B)
 # ----------------------------------------------------
 
-def parse_row(parts):
+def parse_row(parts, detected_assoc):
     """
-    parts is already normalized by extract_table_rows() into:
-    [company, full_name, address, phone_or_empty, email_or_empty, units_or_empty, url_or_empty]
+    Normalizes extracted row arrays into a unified Quickbase-ready dictionary.
+
+    Formats handled:
+      • AAGO: [community_name, street, city_state_zip, optional_profile_url]
+      • HAA:  [company, full_name, address, phone, email, units]
+      • Generic: [company, full_name, address, phone?, email?, units?, url?]
     """
 
+    # ----------------------------------------------------
+    # AAGO FORMAT (community_name, street, CSZ, URL)
+    # ----------------------------------------------------
+    if detected_assoc == "AAGO":
+        if len(parts) < 3:
+            return None  # not enough data to form a record
+
+        name = parts[0].strip()
+        street_line = parts[1].strip()
+        city_state_zip = parts[2].strip()
+        profile_url = parts[3].strip() if len(parts) > 3 else ""
+
+        # Combine street + CSZ into a full address for parsing
+        full_address = f"{street_line} {city_state_zip}"
+        street, city, state, zipcode = parse_address(full_address)
+
+        return {
+            "Company": name,
+            "Property": name,      # AAGO communities don't provide contact name
+            "Street": street,
+            "City": city,
+            "State": state,
+            "Zip": zipcode,
+            "Phone": "",           # Selenium populates later
+            "Email": "",
+            "Units": "",
+            "URL": profile_url,    # required for Selenium phone scraping
+            "Association": detected_assoc,
+            "Member Type": "Owner",
+        }
+
+    # ----------------------------------------------------
+    # GENERIC / HAA FORMAT
+    # ----------------------------------------------------
     if len(parts) < 3:
-        return None  # not enough info to form a row
+        return None  # must have at least company, name, address
 
+    # Basic fields
     company      = parts[0].strip()
     contact_name = parts[1].strip()
     address      = parts[2].strip()
 
-    # Optional fields
-    phone = parts[3].strip() if len(parts) > 3 else ""
-    email = parts[4].strip() if len(parts) > 4 else ""
-    units_raw = parts[5].strip() if len(parts) > 5 else ""
+    # Optional fields (these may not exist)
+    phone       = parts[3].strip() if len(parts) > 3 else ""
+    email       = parts[4].strip() if len(parts) > 4 else ""
+    units_raw   = parts[5].strip() if len(parts) > 5 else ""
     profile_url = parts[6].strip() if len(parts) > 6 else ""
 
-    # Clean units safely
+    # Normalize units (digits only)
     units = re.sub(r"[^\d]", "", units_raw) if units_raw else ""
 
-    # Parse address (street, city, state, zip)
+    # Parse address
     street, city, state, zipcode = parse_address(address)
 
-    # Unified final record format for Quickbase push
     return {
         "Company": company,
-        "Property": contact_name,  # <-- You can rename this depending on meaning
+        "Property": contact_name,
         "Street": street,
         "City": city,
         "State": state,
         "Zip": zipcode,
         "Phone": phone,
         "Email": email,
-        "Units": units if units else "",
-        "URL": profile_url,       # needed for Selenium scrapes (AAGO)
-        "Association": "UNKNOWN", # overwritten later in Streamlit
+        "Units": units,
+        "URL": profile_url,
+        "Association": detected_assoc,
         "Member Type": "Owner",
     }
+
+
 
 
 
@@ -350,41 +393,41 @@ uploaded_file = st.file_uploader("Upload HOA Directory File", type=["txt", "csv"
 
 if uploaded_file:
 
-    # Read file bytes → text
+    # Read file → text
     raw_text = uploaded_file.read().decode("utf-8")
 
     # Detect association AFTER upload
     detected_assoc = detect_association(raw_text)
     st.info(f"Detected Association: **{detected_assoc}**")
 
-    # Step 1: Extract rows from messy text
-    detected_rows = extract_table_rows(raw_text)
+    # Step 1: Extract rows based on association
+    detected_rows = extract_table_rows(raw_text, detected_assoc)
 
     rows = []
 
-    # Step 2: Parse & normalize each row
+    # Step 2: Normalize rows
     for parts in detected_rows:
-        parsed = parse_row(parts)
+        parsed = parse_row(parts, detected_assoc)
         if parsed:
-            parsed["Association"] = detected_assoc
             rows.append(parsed)
 
-    # Step 3: For AAGO, scrape phone numbers if needed
+    # Step 3: AAGO → fetch phone numbers
     if detected_assoc == "AAGO":
-        st.warning("AAGO directory detected — attempting phone number extraction via Selenium.")
-        
+        st.warning("AAGO directory detected — extracting phone numbers via Selenium...")
+
         for row in rows:
-            if not row["Phone"] and row.get("URL"):
-                phone = fetch_aago_phone(row["URL"])
+            url = row.get("URL", "")
+            if url and not row.get("Phone"):
+                phone = fetch_aago_phone(url)
                 row["Phone"] = phone or ""
-    
+
     # Step 4: Display or error
     if rows:
         df = pd.DataFrame(rows)
         st.success(f"Parsed {len(df)} valid rows!")
         st.dataframe(df, use_container_width=True)
 
-        # Allow CSV download
+        # Download CSV
         csv_data = df.to_csv(index=False).encode("utf-8")
         st.download_button(
             "⬇ Download Cleaned CSV",
@@ -393,7 +436,7 @@ if uploaded_file:
             "text/csv"
         )
 
-        # Import into Quickbase
+        # Import to Quickbase
         if st.button("📤 Import to Quickbase"):
             results_df = send_to_quickbase(df)
             st.write("### Quickbase Import Results")
@@ -401,8 +444,3 @@ if uploaded_file:
 
     else:
         st.error("No valid rows were detected in this file.")
-
-
-
-
-  
