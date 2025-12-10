@@ -1,3 +1,5 @@
 streamlit
 pandas
 requests
+selenium
+webdriver-manager
