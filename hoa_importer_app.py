@@ -90,60 +90,95 @@ AAGO_COUNTIES = {
 
 
 def extract_table_rows(raw_text, detected_assoc):
-    """
-    Extracts rows from directory exports.
-    Supports both AAGO list-style directories and HAA-style email-based directories.
-    """
 
     lines = raw_text.splitlines()
     rows = []
 
-    # --------------------------------------
-    # CASE 1: AAGO (NO EMAILS, LIST layout)
-    # --------------------------------------
-    if detected_assoc == "AAGO":
+    if detected_assoc != "AAGO":
+        # fallback to normal HAA handler
+        return extract_haa_rows(raw_text)
 
-        county_dir = "OsceolaCounty"
-        for key, val in AAGO_COUNTIES.items():
-            if key in raw_text.upper():
-                county_dir = val
-                break
+    # Try to detect county
+    county_dir = "OsceolaCounty"
+    for key, val in AAGO_COUNTIES.items():
+        if key in raw_text.upper():
+            county_dir = val
+            break
 
     current = []
-    rows = []
+    seen_name = None
 
     for line in lines:
         l = line.strip()
         if not l:
             continue
 
-        # STEP 1 — Community name (first line)
+        # -------------------------------------------
+        # 1. COMMUNITY NAME (Only alphabetical words)
+        # -------------------------------------------
         if len(current) == 0:
+            # skip duplicate double-name (AAGO does this)
+            if seen_name and l == seen_name:
+                continue
+
+            current.append(l)
+            seen_name = l
+            continue
+
+        # -------------------------------------------
+        # 2. STREET ADDRESS (must start with number)
+        # -------------------------------------------
+        if len(current) == 1 and re.match(r"^\d+ ", l):
             current.append(l)
             continue
 
-        # STEP 2 — Street address
-        if len(current) == 1:
+        # -------------------------------------------
+        # 3. CITY / STATE / ZIP
+        # -------------------------------------------
+        if len(current) == 2 and re.search(r",[ ]*[A-Z]{2}[ ]*\d{5}", l):
             current.append(l)
             continue
 
-        # STEP 3 — City, State ZIP
-        if len(current) == 2:
+        # -------------------------------------------
+        # 3b. OPTIONAL COUNTRY LINE
+        # -------------------------------------------
+        if len(current) == 3 and ("United States" in l or "USA" in l):
+            # do NOT finalize yet
             current.append(l)
             continue
 
-        # STEP 4 — Detect finalizing keyword
-        if "Apartment Community" in l:
+        # -------------------------------------------
+        # 4. FINALIZING LINE → "Apartment Community"
+        # -------------------------------------------
+        if "Apartment Community" in l and len(current) >= 3:
+
             name = current[0]
             slug = re.sub(r"[^A-Za-z0-9]", "", name).lower()
-            url = f"https://www.aago.org/{county_dir}/{slug}"
-            current.append(url)
 
-            rows.append(current)
+            url = f"https://www.aago.org/{county_dir}/{slug}"
+
+            # Clean up any extra optional lines before storing
+            filtered = current[:3]  # name, street, city/state/zip
+            filtered.append(url)
+
+            rows.append(filtered)
+
+            # reset
             current = []
+            seen_name = None
             continue
 
+        # -------------------------------------------
+        # If none of the above matched → reset
+        # (Avoid broken entries)
+        # -------------------------------------------
+        if len(current) > 0 and len(current) < 4:
+            # unexpected junk resets block
+            current = []
+            seen_name = None
+
     return rows
+
 
 
     # --------------------------------------
