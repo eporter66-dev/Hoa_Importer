@@ -5,7 +5,7 @@ import csv
 import re
 import requests
 from io import StringIO
-from bs4 import BeautifulSoup
+
 
 
 # ----------------------------------------------------
@@ -98,52 +98,66 @@ def extract_table_rows(raw_text, detected_assoc):
     lines = raw_text.splitlines()
     rows = []
 
-     # ---------------------------
-    # AAGO HTML-BASED EXTRACTION
-    # ---------------------------
+    # --------------------------------------
+    # CASE 1: AAGO (NO EMAILS, LIST layout)
+    # --------------------------------------
     if detected_assoc == "AAGO":
 
-        soup = BeautifulSoup(raw_text, "html.parser")
+        # Try to detect county from text; default to Osceola
+        county_dir = "OsceolaCounty"
+        for key, val in AAGO_COUNTIES.items():
+            if key in raw_text.upper():
+                county_dir = val
+                break
 
-        # Property boxes on AAGO pages often use a member card layout
-        cards = soup.select(".c-directory-block, .c-member, .c-directory-listing")
+        current = []
 
-        for card in cards:
-
-            # Community Name
-            name_tag = card.select_one("h2, h3, .c-member__name, .c-directory-block__name")
-            if not name_tag:
+        for line in lines:
+            l = line.strip()
+            if not l:
                 continue
-            name = name_tag.get_text(strip=True)
 
-            # Address lines
-            addr_tag = card.select_one(".c-member-badge, .c-directory-block__address")
-            if addr_tag:
-                address_text = addr_tag.get_text(" ", strip=True)
-            else:
-                address_text = ""
+            # 1. Community name (first line of each entry)
+            if (
+                re.match(r"^[A-Za-z0-9].+", l)
+                and "," not in l
+                and "Apartment Community" not in l
+            ):
+                # finalize previous block if complete
+                if len(current) == 3:
+                    rows.append(current)
+                current = [l]  # new community name
+                continue
 
-            # Profile URL
-            link_tag = card.find("a", string=lambda x: x and "View Profile" in x)
-            url = ""
-            if link_tag and link_tag.get("href"):
-                href = link_tag["href"]
-                # Normalize path into full absolute URL
-                if href.startswith("/"):
-                    url = f"https://www.aago.org{href}"
-                else:
-                    url = f"https://www.aago.org/{href}"
+            # 2. Street line
+            if len(current) == 1 and re.search(r"\d+ .+", l) and "," not in l:
+                current.append(l)
+                continue
 
-            street, city, state, zipcode = parse_address(address_text)
+            # 3. City, State, ZIP line
+            if len(current) == 2 and re.search(r".+,\s*[A-Z]{2}\s*\d{5}", l):
+                current.append(l)
+                continue
 
-            rows.append([name, street, f"{city} {state} {zipcode}", url])
+            # 4. "Apartment Community" → finalize block and build URL
+            if "Apartment Community" in l and len(current) == 3:
+                name = current[0]
+                slug = re.sub(r"[^a-zA-Z0-9]", "", name).lower()
+                url = f"https://www.aago.org/{county_dir}/{slug}"
+                current.append(url)
+                rows.append(current)
+                current = []
+                continue
+
+        # no need to flush here unless you want partial rows:
+        # if len(current) == 3:
+        #     rows.append(current)
 
         return rows
 
     # --------------------------------------
     # CASE 2: HAA / GENERIC EMAIL-BASED DIRECTORY
     # --------------------------------------
-
     email_regex = r"[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}"
 
     for line in lines:
@@ -176,10 +190,10 @@ def extract_table_rows(raw_text, detected_assoc):
             full_name = parts[1]
             address = parts[2]
             phone = parts[3]
-
             rows.append([company, full_name, address, phone, email, units])
 
     return rows
+
 
 
 
