@@ -81,71 +81,103 @@ def detect_association(raw_text):
 
 def extract_table_rows(raw_text):
     """
-    Extract structured rows from HAA directory exports.
-    Works even when pasted as messy text.
-    Uses the presence of emails as row anchors.
+    Extract structured rows from multiple directory formats (HAA, AAGO, others).
+    Supports:
+      - HAA-style rows with email anchors
+      - AAGO rows with NO email, but with phone + member profile URL
+      - Mixed whitespace formats
+      - Hidden phone numbers that require Selenium later
+    Returns rows as:
+      [company, contact_name, address, phone(or ""), email(or ""), units(or ""), url(or "")]
     """
 
     lines = raw_text.splitlines()
     rows = []
 
     email_regex = r"[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}"
+    phone_regex = r"\(?\d{3}\)?[-.\s]*\d{3}[-.\s]*\d{4}"
+    url_regex = r"https?://\S+"
 
     for line in lines:
         cleaned = line.strip()
+        low = cleaned.lower()
 
-        # Skip obvious non-data lines
-        if not cleaned or len(cleaned) < 10:
+        # Skip obvious junk/header lines
+        if not cleaned or len(cleaned) < 6:
             continue
-        if cleaned.lower().startswith(("cookie", "skip to", "want to find", "search for", "company name", "units greater", "company\tfull", "company full", "to view complete")):
+        if low.startswith(("cookie", "skip to", "want to find", "search for",
+                           "company name", "units greater", "company\tfull",
+                           "company full", "to view complete", "member login",
+                           "cart", "home", "directory")):
             continue
 
-        # Email determines row boundaries
+        # ========== CASE 1: HAA FORMAT (EMAIL ANCHOR) ==========
         email_match = re.search(email_regex, cleaned)
-        if not email_match:
-            continue
 
-        email = email_match.group(0)
+        if email_match:
+            email = email_match.group(0)
 
-        # Split around email
-        before = cleaned[:email_match.start()].strip()
-        after = cleaned[email_match.end():].strip()
+            # Split around email
+            before = cleaned[:email_match.start()].strip()
+            after = cleaned[email_match.end():].strip()
 
-        # Units should be last
-        units = re.sub(r"[^\d]", "", after) if after else ""
+            units = re.sub(r"[^\d]", "", after) if after else ""
+            parts = re.split(r"\s{2,}|\t", before)
 
-        # Before email should contain 4 columns:
-        # Company, Full Name, Address, Phone
-        parts = re.split(r"\s{2,}|\t", before)
+            # Fallback parsing
+            if len(parts) < 4:
+                tokens = before.split()
+                phone_idx = None
+                for i, tok in enumerate(tokens):
+                    if re.match(phone_regex, tok):
+                        phone_idx = i
+                        break
+                if phone_idx:
+                    company = tokens[0]
+                    full_name = tokens[1]
+                    address = " ".join(tokens[2:phone_idx])
+                    phone = tokens[phone_idx]
+                else:
+                    # skip if too messy
+                    continue
+            else:
+                company, full_name, address, phone = parts[:4]
 
-        # If too few parts, fallback to single-space heuristics
-        if len(parts) < 4:
-            tokens = before.split()
-            # last token is phone, address is variable length
-            phone_idx = None
-            for i, tok in enumerate(tokens):
-                if re.match(r"\(?\d{3}\)?[-.\s]*\d{3}[-.\s]*\d{4}", tok):
-                    phone_idx = i
-                    break
+            rows.append([company, full_name, address, phone, email, units, ""])
+            continue  # move to next line
 
-            if phone_idx:
+        # ========== CASE 2: AAGO FORMAT (NO EMAIL, HAS URL + PHONE HIDDEN) ==========
+        url_match = re.search(url_regex, cleaned)
+        phone_match = re.search(phone_regex, cleaned)  # may not exist visually
+
+        if url_match:
+            url = url_match.group(0)
+            phone = phone_match.group(0) if phone_match else ""
+
+            # Remove URL + phone from text, leaving company + contact + address
+            text_wo_url = cleaned.replace(url, "").strip()
+            if phone:
+                text_wo_url = text_wo_url.replace(phone, "").strip()
+
+            parts = re.split(r"\s{2,}|\t", text_wo_url)
+
+            # Fallback split
+            tokens = text_wo_url.split()
+            if len(tokens) >= 3:
                 company = tokens[0]
                 full_name = tokens[1]
-                address = " ".join(tokens[2:phone_idx])
-                phone = tokens[phone_idx]
-                parts = [company, full_name, address, phone]
+                address = " ".join(tokens[2:])
+            else:
+                continue
 
-        if len(parts) < 4:
-            continue  # skip invalid row
+            rows.append([company, full_name, address, phone, "", "", url])
+            continue
 
-        company = parts[0]
-        full_name = parts[1]
-        address = parts[2]
-        phone = parts[3]
-
-        rows.append([company, full_name, address, phone, email, units])
+        # ========== OTHERWISE: Not a usable row ==========
+        continue
 
     return rows
+
 
 
 
@@ -186,76 +218,46 @@ def clean_units(value):
 # ----------------------------------------------------
 
 def parse_row(parts):
-    parts = [p.strip() for p in parts]
+    """
+    parts is already normalized by extract_table_rows() into:
+    [company, full_name, address, phone_or_empty, email_or_empty, units_or_empty, url_or_empty]
+    """
 
-    # Skip junk rows early
-    txt = " ".join(parts).lower()
-    if len(parts) < 6 or "```" in txt or "..." in txt or "there are" in txt:
-        return None
+    if len(parts) < 3:
+        return None  # not enough info to form a row
 
-    # Fix: collapse extra columns into Format B length
-    if len(parts) > 11:
-        core = parts[:11]
-        return parse_row(core)
+    company      = parts[0].strip()
+    contact_name = parts[1].strip()
+    address      = parts[2].strip()
 
-    # ----------------------------------------------------
-    # FORMAT B — 11 columns (ideal)
-    # ----------------------------------------------------
-    if len(parts) == 11:
-        return {
-            "Company": parts[0],
-            "Property": parts[1],
-            "Street": parts[2],
-            "City": parts[3],
-            "State": parts[4],
-            "Zip": parts[5],
-            "Phone": parts[6],
-            "Email": parts[7],
-            "Units": parts[8],
-            "Association": parts[9] or "HAA",
-            "Member Type": parts[10] or "Owner",
-        }
+    # Optional fields
+    phone = parts[3].strip() if len(parts) > 3 else ""
+    email = parts[4].strip() if len(parts) > 4 else ""
+    units_raw = parts[5].strip() if len(parts) > 5 else ""
+    profile_url = parts[6].strip() if len(parts) > 6 else ""
 
-    # ----------------------------------------------------
-    # FORMAT A — 6 columns
-    # ----------------------------------------------------
-    if len(parts) == 6:
-        street, city, state, zipcode = parse_address(parts[2])
-        return {
-            "Company": parts[0],
-            "Property": parts[1],
-            "Street": street,
-            "City": city,
-            "State": state,
-            "Zip": zipcode,
-            "Phone": parts[3],
-            "Email": parts[4],
-            "Units": parts[5],
-            "Association": "HAA",
-            "Member Type": "Owner",
-        }
+    # Clean units safely
+    units = re.sub(r"[^\d]", "", units_raw) if units_raw else ""
 
-    # ----------------------------------------------------
-    # FORMAT C — 7 columns
-    # ----------------------------------------------------
-    if len(parts) == 7:
-        merged = f"{parts[2]} {parts[3]}"
-        street, city, state, zipcode = parse_address(merged)
-        return {
-            "Company": parts[0],
-            "Property": parts[1],
-            "Street": street,
-            "City": city,
-            "State": state,
-            "Zip": zipcode,
-            "Phone": parts[4],
-            "Email": parts[5],
-            "Units": parts[6],
-            "Association": "HAA",
-            "Member Type": "Owner",
-        }
+    # Parse address (street, city, state, zip)
+    street, city, state, zipcode = parse_address(address)
 
-    return None
+    # Unified final record format for Quickbase push
+    return {
+        "Company": company,
+        "Property": contact_name,  # <-- You can rename this depending on meaning
+        "Street": street,
+        "City": city,
+        "State": state,
+        "Zip": zipcode,
+        "Phone": phone,
+        "Email": email,
+        "Units": units if units else "",
+        "URL": profile_url,       # needed for Selenium scrapes (AAGO)
+        "Association": "UNKNOWN", # overwritten later in Streamlit
+        "Member Type": "Owner",
+    }
+
 
 
 
@@ -301,6 +303,42 @@ def send_to_quickbase(df: pd.DataFrame):
 
     return pd.DataFrame(results)
 
+from selenium import webdriver
+from selenium.webdriver.chrome.options import Options
+from selenium.webdriver.common.by import By
+import time
+
+def fetch_aago_phone(url):
+    """
+    Uses headless Chrome to open an AAGO profile URL and extract the phone number.
+    Used only when detect_association == "AAGO".
+    """
+
+    chrome_options = Options()
+    chrome_options.add_argument("--headless=new")
+    chrome_options.add_argument("--disable-gpu")
+    chrome_options.add_argument("--no-sandbox")
+    chrome_options.add_argument("--disable-dev-shm-usage")
+
+    driver = webdriver.Chrome(options=chrome_options)
+
+    try:
+        driver.get(url)
+        time.sleep(1.5)  # Allow JS to load
+
+        # Example selector — adjust after seeing final page
+        phone_elem = driver.find_element(By.CSS_SELECTOR, ".profile-phone")
+        phone = phone_elem.text.strip()
+        return phone
+
+    except Exception as e:
+        print("AAGO scrape error:", e)
+        return ""
+
+    finally:
+        driver.quit()
+
+
 
 # ----------------------------------------------------
 # STREAMLIT UI
@@ -311,14 +349,15 @@ st.write("Upload a `.txt` or `.csv` directory export, and this tool will normali
 uploaded_file = st.file_uploader("Upload HOA Directory File", type=["txt", "csv"])
 
 if uploaded_file:
-    # Read uploaded file
+
+    # Read file bytes → text
     raw_text = uploaded_file.read().decode("utf-8")
 
-    # Detect association based on content
+    # Detect association AFTER upload
     detected_assoc = detect_association(raw_text)
     st.info(f"Detected Association: **{detected_assoc}**")
 
-    # Step 1: Extract rows from messy directory text
+    # Step 1: Extract rows from messy text
     detected_rows = extract_table_rows(raw_text)
 
     rows = []
@@ -327,11 +366,19 @@ if uploaded_file:
     for parts in detected_rows:
         parsed = parse_row(parts)
         if parsed:
-            # Assign detected association to ALL rows
             parsed["Association"] = detected_assoc
             rows.append(parsed)
 
-    # Step 3: Display or error out
+    # Step 3: For AAGO, scrape phone numbers if needed
+    if detected_assoc == "AAGO":
+        st.warning("AAGO directory detected — attempting phone number extraction via Selenium.")
+        
+        for row in rows:
+            if not row["Phone"] and row.get("URL"):
+                phone = fetch_aago_phone(row["URL"])
+                row["Phone"] = phone or ""
+    
+    # Step 4: Display or error
     if rows:
         df = pd.DataFrame(rows)
         st.success(f"Parsed {len(df)} valid rows!")
@@ -354,6 +401,8 @@ if uploaded_file:
 
     else:
         st.error("No valid rows were detected in this file.")
+
+
 
 
   
