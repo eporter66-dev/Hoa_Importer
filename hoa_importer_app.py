@@ -424,8 +424,8 @@ def fetch_aago_urls(county_url):
         driver.get(county_url)
         time.sleep(2)
 
-        # Each community block is inside: <div class="col-md-4">
-        cards = driver.find_elements(By.CSS_SELECTOR, "div.col-md-4")
+        # CORRECT SELECTOR — this is what AAGO uses now
+        cards = driver.find_elements(By.CSS_SELECTOR, ".directory-item")
 
         for card in cards:
             try:
@@ -435,18 +435,20 @@ def fetch_aago_urls(county_url):
                 name = name_el.text.strip()
                 href = link_el.get_attribute("href")
 
-                # Fix relative URLs
+                # Fix relative URLs like "/OsceolaCounty/..."
                 if href.startswith("/"):
                     href = "https://www.aago.org" + href
 
                 results[name] = href
-            except:
+
+            except Exception:
                 continue
 
         return results
 
     finally:
         driver.quit()
+
 
 
 
