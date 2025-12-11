@@ -88,6 +88,25 @@ AAGO_COUNTIES = {
     "VOLUSIA COUNTY": "VolusiaCounty"
 }
 
+def detect_aago_county_url(raw_text: str) -> str:
+    """
+    Detects which AAGO county page should be used,
+    based on text inside the uploaded directory file.
+
+    Returns a full URL such as:
+        https://www.aago.org/OsceolaCounty
+    """
+
+    text = raw_text.upper()
+
+    for key, slug in AAGO_COUNTIES.items():
+        if key in text:
+            return f"https://www.aago.org/{slug}"
+
+    # Default fallback: Osceola
+    return "https://www.aago.org/OsceolaCounty"
+
+
 
 def extract_table_rows(raw_text, detected_assoc):
     """
@@ -390,6 +409,7 @@ def fetch_aago_urls(county_url):
     Loads the AAGO county listing page and extracts real profile URLs.
     Returns: dict { community_name : profile_url }
     """
+
     chrome_options = Options()
     chrome_options.add_argument("--headless=new")
     chrome_options.add_argument("--disable-gpu")
@@ -404,14 +424,22 @@ def fetch_aago_urls(county_url):
         driver.get(county_url)
         time.sleep(2)
 
-        # Select all apartment listings
-        cards = driver.find_elements(By.CSS_SELECTOR, ".community-item")
+        # Each community block is inside: <div class="col-md-4">
+        cards = driver.find_elements(By.CSS_SELECTOR, "div.col-md-4")
 
         for card in cards:
             try:
-                name = card.find_element(By.CSS_SELECTOR, "h3").text.strip()
-                link = card.find_element(By.CSS_SELECTOR, "a").get_attribute("href")
-                results[name] = link
+                name_el = card.find_element(By.CSS_SELECTOR, "h3")
+                link_el = card.find_element(By.CSS_SELECTOR, "a")
+
+                name = name_el.text.strip()
+                href = link_el.get_attribute("href")
+
+                # Fix relative URLs
+                if href.startswith("/"):
+                    href = "https://www.aago.org" + href
+
+                results[name] = href
             except:
                 continue
 
@@ -419,6 +447,7 @@ def fetch_aago_urls(county_url):
 
     finally:
         driver.quit()
+
 
 
 
@@ -440,8 +469,8 @@ def fetch_aago_profile(url):
     result = {"Phone": "", "Email": ""}
 
     PHONE_SELECTORS = [
-        "div.col-md-4 p",
-        "div.col-sm-4 p",
+        ".info-section p",
+        ".info-section .mb-1",
         ".contact-info p",
         "p",
     ]
@@ -450,9 +479,6 @@ def fetch_aago_profile(url):
         driver.get(url)
         time.sleep(2)
 
-        # -------------------------
-        # PHONE SCRAPING
-        # -------------------------
         phone_found = ""
 
         for selector in PHONE_SELECTORS:
@@ -467,9 +493,7 @@ def fetch_aago_profile(url):
 
         result["Phone"] = phone_found
 
-        # -------------------------
-        # EMAIL / CONTACT FORM
-        # -------------------------
+        # Email is not exposed — but contact form exists
         try:
             btn = driver.find_element(By.CSS_SELECTOR, "a.btn.btn-primary.btn-sm")
             if "message" in btn.text.lower():
@@ -485,6 +509,9 @@ def fetch_aago_profile(url):
 
     finally:
         driver.quit()
+
+
+
 
 
 
