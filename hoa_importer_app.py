@@ -387,9 +387,9 @@ import time
 
 def fetch_aago_profile(url):
     """
-    Scrapes an AAGO profile page and returns:
-        • Phone number (if available)
-        • Email = 'CONTACT_FORM' if contact form exists
+    Scrapes AAGO profile pages to extract:
+        • Phone (from multiple possible layouts)
+        • Email placeholder ("CONTACT_FORM") if a message button exists
     """
 
     chrome_options = Options()
@@ -400,26 +400,42 @@ def fetch_aago_profile(url):
 
     driver = webdriver.Chrome(options=chrome_options)
 
-    result = {
-        "Phone": "",
-        "Email": "",
-    }
+    result = {"Phone": "", "Email": ""}
+
+    PHONE_SELECTORS = [
+        "div.col-md-4 p",
+        "div.col-sm-4 p",
+        ".contact-info p",
+        "p",
+    ]
 
     try:
         driver.get(url)
-        time.sleep(2)  # allow JS to render
+        time.sleep(2)
 
-        # Extract phone number
-        try:
-            phone_elem = driver.find_element(By.CSS_SELECTOR, ".profile-phone")
-            result["Phone"] = phone_elem.text.strip()
-        except:
-            pass  # phone missing
+        # -------------------------
+        # PHONE SCRAPING
+        # -------------------------
+        phone_found = ""
 
-        # Detect contact form → substitute as email placeholder
+        for selector in PHONE_SELECTORS:
+            elems = driver.find_elements(By.CSS_SELECTOR, selector)
+            for el in elems:
+                text = el.text.strip()
+                if re.search(r"\(?\d{3}\)?[-.\s]?\d{3}[-.\s]?\d{4}", text):
+                    phone_found = text
+                    break
+            if phone_found:
+                break
+
+        result["Phone"] = phone_found
+
+        # -------------------------
+        # EMAIL / CONTACT FORM
+        # -------------------------
         try:
             btn = driver.find_element(By.CSS_SELECTOR, "a.btn.btn-primary.btn-sm")
-            if "send a message" in btn.text.lower():
+            if "message" in btn.text.lower():
                 result["Email"] = "CONTACT_FORM"
         except:
             pass
@@ -432,6 +448,7 @@ def fetch_aago_profile(url):
 
     finally:
         driver.quit()
+
 
 
 
