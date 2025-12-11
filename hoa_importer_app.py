@@ -421,6 +421,7 @@ def fetch_aago_urls(county_url):
         driver.quit()
 
 
+
 def fetch_aago_profile(url):
     """
     Scrapes AAGO profile pages to extract:
@@ -493,62 +494,88 @@ def fetch_aago_profile(url):
 # STREAMLIT UI
 # ----------------------------------------------------
 st.title("🏢 HOA Directory → Quickbase Import Tool")
-st.write("Upload a `.txt` or `.csv` directory export, and this tool will normalize it and import into Quickbase.")
+st.write("Upload a `.txt` or `.csv` directory export, and this tool will normalize it and prepare it for Quickbase import.")
 
 uploaded_file = st.file_uploader("Upload HOA Directory File", type=["txt", "csv"])
 
 if uploaded_file:
 
-    # Read file → text
+    # -----------------------------
+    # Read uploaded file
+    # -----------------------------
     raw_text = uploaded_file.read().decode("utf-8")
 
-    # Detect association AFTER upload
+    # Detect association
     detected_assoc = detect_association(raw_text)
     st.info(f"Detected Association: **{detected_assoc}**")
 
-    # Step 1: Extract rows based on association
+    # -----------------------------
+    # Extract rows based on association
+    # -----------------------------
     detected_rows = extract_table_rows(raw_text, detected_assoc)
-
     rows = []
 
-    # Step 2: Normalize rows
     for parts in detected_rows:
         parsed = parse_row(parts, detected_assoc)
         if parsed:
             rows.append(parsed)
 
-    # Step 3: AAGO → fetch phone numbers
+    # -----------------------------
+    # AAGO SPECIAL WORKFLOW
+    # -----------------------------
     if detected_assoc == "AAGO":
-        st.warning("AAGO directory detected — extracting phone numbers via Selenium...")
+        st.warning("AAGO directory detected — fetching profile details using Selenium...")
 
+        # Step A: Build URL map from county page
+        county_url = detect_aago_county_url(raw_text)  # <-- You must create this helper
+        url_map = fetch_aago_urls(county_url)
+
+        # Step B: Inject real URLs into rows
         for row in rows:
+            name = row["Company"]
+            if name in url_map:
+                row["URL"] = url_map[name]
+
+        # Step C: Fetch phone + email from each profile
+        progress = st.progress(0.0)
+        for i, row in enumerate(rows):
             url = row.get("URL", "")
             if url:
-                profile = fetch_aago_profile(url)
-                row["Phone"] = profile["Phone"]
-                row["Email"] = profile["Email"]
+                profile = fetch_aago_profile(url)   # <-- uses Selenium
+                row["Phone"] = profile.get("Phone", "")
+                row["Email"] = profile.get("Email", "")
 
+            progress.progress((i + 1) / len(rows))
 
-    # Step 4: Display or error
+        st.success("AAGO profiles successfully scanned!")
+
+    # -----------------------------
+    # Display results or error
+    # -----------------------------
     if rows:
         df = pd.DataFrame(rows)
+
         st.success(f"Parsed {len(df)} valid rows!")
         st.dataframe(df, use_container_width=True)
 
-        # Download CSV
-        csv_data = df.to_csv(index=False).encode("utf-8")
+        # -----------------------------
+        # CSV Download
+        # -----------------------------
+        csv_bytes = df.to_csv(index=False).encode("utf-8")
         st.download_button(
-            "⬇ Download Cleaned CSV",
-            csv_data,
-            "hoa_cleaned.csv",
-            "text/csv"
+            label="⬇ Download Cleaned CSV",
+            data=csv_bytes,
+            file_name="hoa_cleaned.csv",
+            mime="text/csv"
         )
 
-        # Import to Quickbase
+        # -----------------------------
+        # Quickbase Import
+        # -----------------------------
         if st.button("📤 Import to Quickbase"):
             results_df = send_to_quickbase(df)
             st.write("### Quickbase Import Results")
-            st.dataframe(results_df)
+            st.dataframe(results_df, use_container_width=True)
 
     else:
         st.error("No valid rows were detected in this file.")
