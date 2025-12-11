@@ -385,10 +385,11 @@ from selenium.webdriver.chrome.options import Options
 from selenium.webdriver.common.by import By
 import time
 
-def fetch_aago_phone(url):
+def fetch_aago_profile(url):
     """
-    Uses headless Chrome to open an AAGO profile URL and extract the phone number.
-    Used only when detect_association == "AAGO".
+    Scrapes an AAGO profile page and returns:
+        • Phone number (if available)
+        • Email = 'CONTACT_FORM' if contact form exists
     """
 
     chrome_options = Options()
@@ -399,21 +400,39 @@ def fetch_aago_phone(url):
 
     driver = webdriver.Chrome(options=chrome_options)
 
+    result = {
+        "Phone": "",
+        "Email": "",
+    }
+
     try:
         driver.get(url)
-        time.sleep(1.5)  # Allow JS to load
+        time.sleep(2)  # allow JS to render
 
-        # Example selector — adjust after seeing final page
-        phone_elem = driver.find_element(By.CSS_SELECTOR, ".profile-phone")
-        phone = phone_elem.text.strip()
-        return phone
+        # Extract phone number
+        try:
+            phone_elem = driver.find_element(By.CSS_SELECTOR, ".profile-phone")
+            result["Phone"] = phone_elem.text.strip()
+        except:
+            pass  # phone missing
+
+        # Detect contact form → substitute as email placeholder
+        try:
+            btn = driver.find_element(By.CSS_SELECTOR, "a.btn.btn-primary.btn-sm")
+            if "send a message" in btn.text.lower():
+                result["Email"] = "CONTACT_FORM"
+        except:
+            pass
+
+        return result
 
     except Exception as e:
         print("AAGO scrape error:", e)
-        return ""
+        return result
 
     finally:
         driver.quit()
+
 
 
 
@@ -451,9 +470,11 @@ if uploaded_file:
 
         for row in rows:
             url = row.get("URL", "")
-            if url and not row.get("Phone"):
-                phone = fetch_aago_phone(url)
-                row["Phone"] = phone or ""
+            if url:
+                profile = fetch_aago_profile(url)
+                row["Phone"] = profile["Phone"]
+                row["Email"] = profile["Email"]
+
 
     # Step 4: Display or error
     if rows:
