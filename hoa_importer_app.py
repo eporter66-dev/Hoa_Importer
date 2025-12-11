@@ -90,106 +90,94 @@ AAGO_COUNTIES = {
 
 
 def extract_table_rows(raw_text, detected_assoc):
+    """
+    Extract rows from AAGO text-based directories or HAA-style directories.
+    """
 
     lines = raw_text.splitlines()
     rows = []
 
-    if detected_assoc != "AAGO":
-        # fallback to normal HAA handler
-        return extract_haa_rows(raw_text)
+    # -------------------------------------------------------------------
+    # AAGO MODE — text-only directories with NO email, NO phone on list
+    # -------------------------------------------------------------------
+    if detected_assoc == "AAGO":
 
-    # Try to detect county
-    county_dir = "OsceolaCounty"
-    for key, val in AAGO_COUNTIES.items():
-        if key in raw_text.upper():
-            county_dir = val
-            break
+        # Detect county for URL building
+        county_dir = "OsceolaCounty"
+        for key, val in AAGO_COUNTIES.items():
+            if key in raw_text.upper():
+                county_dir = val
+                break
 
-    current = []
-    seen_name = None
+        current = []  # [name, street, cityzip, url?]
 
-    for line in lines:
-        l = line.strip()
-        if not l:
-            continue
+        def finalize_current():
+            """Add the block to rows if valid."""
+            if len(current) >= 3:
+                rows.append(current.copy())
 
-        # -------------------------------------------
-        # 1. COMMUNITY NAME (Only alphabetical words)
-        # -------------------------------------------
-        if len(current) == 0:
-            # skip duplicate double-name (AAGO does this)
-            if seen_name and l == seen_name:
+        for line in lines:
+            l = line.strip()
+            if not l:
                 continue
 
-            current.append(l)
-            seen_name = l
-            continue
+            # Skip filler words
+            if l in ("United States", "Search", "List", "Map"):
+                continue
 
-        # -------------------------------------------
-        # 2. STREET ADDRESS (must start with number)
-        # -------------------------------------------
-        if len(current) == 1 and re.match(r"^\d+ ", l):
-            current.append(l)
-            continue
+            # Skip block counters like "15 found from search"
+            if re.match(r"^\d+\s+found\s+from\s+search$", l.lower()):
+                continue
 
-        # -------------------------------------------
-        # 3. CITY / STATE / ZIP
-        # -------------------------------------------
-        if len(current) == 2 and re.search(r",[ ]*[A-Z]{2}[ ]*\d{5}", l):
-            current.append(l)
-            continue
+            # 1. Community name — ONLY when not a duplicate
+            if (
+                re.match(r"^[A-Za-z0-9].+", l) and
+                "," not in l and
+                "Apartment Community" not in l
+            ):
+                # Duplicate-name protection: ignore if identical to previous
+                if current and l == current[0]:
+                    continue
 
-        # -------------------------------------------
-        # 3b. OPTIONAL COUNTRY LINE
-        # -------------------------------------------
-        if len(current) == 3 and ("United States" in l or "USA" in l):
-            # do NOT finalize yet
-            current.append(l)
-            continue
+                # New block → flush previous
+                finalize_current()
+                current = [l]
+                continue
 
-        # -------------------------------------------
-        # 4. FINALIZING LINE → "Apartment Community"
-        # -------------------------------------------
-        if "Apartment Community" in l and len(current) >= 3:
+            # 2. Street line
+            if len(current) == 1 and re.search(r"\d+ .+", l) and "," not in l:
+                current.append(l)
+                continue
 
-            name = current[0]
-            slug = re.sub(r"[^A-Za-z0-9]", "", name).lower()
+            # 3. City / State / ZIP
+            if len(current) == 2 and re.search(r".+,\s*[A-Z]{2}\s*\d{5}", l):
+                current.append(l)
+                continue
 
-            url = f"https://www.aago.org/{county_dir}/{slug}"
+            # 4. Category line ("Apartment Community") → finalize block + build URL
+            if "Apartment Community" in l:
+                if len(current) == 3:
+                    name = current[0]
+                    slug = re.sub(r"[^a-zA-Z0-9]", "", name).lower()
+                    url = f"https://www.aago.org/{county_dir}/{slug}"
+                    current.append(url)
+                    finalize_current()
+                    current = []
+                continue
 
-            # Clean up any extra optional lines before storing
-            filtered = current[:3]  # name, street, city/state/zip
-            filtered.append(url)
+        # Flush remaining entry if valid
+        finalize_current()
 
-            rows.append(filtered)
+        return rows
 
-            # reset
-            current = []
-            seen_name = None
-            continue
-
-        # -------------------------------------------
-        # If none of the above matched → reset
-        # (Avoid broken entries)
-        # -------------------------------------------
-        if len(current) > 0 and len(current) < 4:
-            # unexpected junk resets block
-            current = []
-            seen_name = None
-
-    return rows
-
-
-
-    # --------------------------------------
-    # CASE 2: HAA / GENERIC EMAIL-BASED DIRECTORY
-    # --------------------------------------
+    # -------------------------------------------------------------------
+    # HAA / GENERIC email-based parser
+    # -------------------------------------------------------------------
     email_regex = r"[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}"
 
     for line in lines:
         cleaned = line.strip()
 
-        # Skip non-data noise
         if not cleaned or len(cleaned) < 10:
             continue
         if cleaned.lower().startswith((
@@ -205,20 +193,22 @@ def extract_table_rows(raw_text, detected_assoc):
 
         email = email_match.group(0)
         before = cleaned[:email_match.start()].strip()
-        after = cleaned[email_match.end():].strip()
-
+        after  = cleaned[email_match.end():].strip()
         units = re.sub(r"[^\d]", "", after) if after else ""
 
         parts = re.split(r"\s{2,}|\t", before)
-
         if len(parts) >= 4:
-            company = parts[0]
-            full_name = parts[1]
-            address = parts[2]
-            phone = parts[3]
-            rows.append([company, full_name, address, phone, email, units])
+            rows.append([
+                parts[0], parts[1], parts[2], parts[3],
+                email, units
+            ])
 
     return rows
+
+
+
+
+
 
 
 
