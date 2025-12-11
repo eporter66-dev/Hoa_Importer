@@ -526,7 +526,7 @@ if uploaded_file:
         st.warning("AAGO directory detected — fetching profile details using Selenium...")
 
         # Step A: Build URL map from county page
-        county_url = detect_aago_county_url(raw_text)  # <-- You must create this helper
+        county_url = fetch_aago_urls(raw_text)  # <-- You must create this helper
         url_map = fetch_aago_urls(county_url)
 
         # Step B: Inject real URLs into rows
