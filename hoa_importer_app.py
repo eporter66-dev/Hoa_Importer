@@ -443,43 +443,28 @@ def aago_login(driver) -> bool:
     return True
 
 
-def fetch_aago_urls(county_url):
-    chrome_options = Options()
-    chrome_options.add_argument("--headless=new")
-    chrome_options.add_argument("--disable-gpu")
-    chrome_options.add_argument("--no-sandbox")
-    chrome_options.add_argument("--disable-dev-shm-usage")
+def fetch_aago_urls(driver, county_url):
+    driver.get(county_url)
+    time.sleep(2)
 
-    driver = webdriver.Chrome(options=chrome_options)
+    results = {}
 
-    try:
-        # LOGIN FIRST
-        if not aago_login(driver):
-            return {}
+    cards = driver.find_elements(By.CSS_SELECTOR, ".directory-item")
 
-        driver.get(county_url)
-        time.sleep(2)
+    for card in cards:
+        try:
+            name = card.find_element(By.CSS_SELECTOR, "h3").text.strip()
+            href = card.find_element(By.CSS_SELECTOR, "a").get_attribute("href")
 
-        cards = driver.find_elements(By.CSS_SELECTOR, ".directory-item")
+            if href.startswith("/"):
+                href = "https://www.aago.org" + href
 
-        results = {}
+            results[name] = href
+        except:
+            continue
 
-        for card in cards:
-            try:
-                name = card.find_element(By.CSS_SELECTOR, "h3").text.strip()
-                href = card.find_element(By.CSS_SELECTOR, "a").get_attribute("href")
+    return results
 
-                if href.startswith("/"):
-                    href = "https://www.aago.org" + href
-
-                results[name] = href
-            except:
-                continue
-
-        return results
-
-    finally:
-        driver.quit()
 
 
 
@@ -588,7 +573,7 @@ if uploaded_file:
             else:
                 # 2️⃣ BUILD URL MAP
                 county_url = detect_aago_county_url(raw_text)
-                url_map = fetch_aago_urls(county_url)
+                url_map = fetch_aago_urls(driver, county_url)
 
                 for row in rows:
                     name = row["Company"]
