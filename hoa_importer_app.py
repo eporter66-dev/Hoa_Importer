@@ -408,39 +408,67 @@ from selenium.webdriver.support.ui import WebDriverWait
 from selenium.webdriver.support import expected_conditions as EC
 
 def aago_login(driver) -> bool:
-    wait = WebDriverWait(driver, 20)
+    wait = WebDriverWait(driver, 25)
 
     driver.get("https://www.aago.org/login")
 
     email = st.secrets["AAGO_EMAIL"]
     password = st.secrets["AAGO_PASSWORD"]
 
-    email_input = wait.until(
-        EC.presence_of_element_located(
-            (By.XPATH, "//input[contains(@type,'email')]")
+    try:
+        # Wait for ANY input field to appear
+        wait.until(EC.presence_of_element_located((By.TAG_NAME, "input")))
+
+        inputs = driver.find_elements(By.TAG_NAME, "input")
+
+        email_input = None
+        password_input = None
+
+        for inp in inputs:
+            itype = (inp.get_attribute("type") or "").lower()
+            name = (inp.get_attribute("name") or "").lower()
+            placeholder = (inp.get_attribute("placeholder") or "").lower()
+
+            if not email_input and (
+                "email" in itype
+                or "email" in name
+                or "email" in placeholder
+            ):
+                email_input = inp
+
+            if not password_input and (
+                "password" in itype
+                or "password" in name
+                or "password" in placeholder
+            ):
+                password_input = inp
+
+        if not email_input or not password_input:
+            raise Exception("Login inputs not found on page")
+
+        email_input.clear()
+        email_input.send_keys(email)
+
+        password_input.clear()
+        password_input.send_keys(password)
+        password_input.send_keys(Keys.RETURN)
+
+        # Confirm login succeeded
+        wait.until(
+            EC.presence_of_element_located(
+                (
+                    By.XPATH,
+                    "//a[contains(@href,'logout') or contains(@href,'account') or contains(text(),'Logout')]"
+                )
+            )
         )
-    )
-    password_input = wait.until(
-        EC.presence_of_element_located(
-            (By.XPATH, "//input[contains(@type,'password')]")
-        )
-    )
 
-    email_input.clear()
-    email_input.send_keys(email)
+        return True
 
-    password_input.clear()
-    password_input.send_keys(password)
-    password_input.send_keys(Keys.RETURN)
+    except Exception as e:
+        st.error(f"AAGO login failed: {e}")
+        return False
 
-    # Confirm authenticated session
-    wait.until(
-        EC.presence_of_element_located(
-            (By.XPATH, "//a[contains(@href,'logout') or contains(@href,'account')]")
-        )
-    )
-
-    return True
 
 
 def fetch_aago_urls(driver, county_url):
@@ -559,7 +587,7 @@ if uploaded_file:
         st.warning("AAGO directory detected — fetching profile details using Selenium...")
 
         chrome_options = Options()
-        chrome_options.add_argument("--headless=new")
+        # chrome_options.add_argument("--headless=new")
         chrome_options.add_argument("--disable-gpu")
         chrome_options.add_argument("--no-sandbox")
         chrome_options.add_argument("--disable-dev-shm-usage")
