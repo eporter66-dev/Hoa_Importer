@@ -404,34 +404,41 @@ from selenium.webdriver.chrome.options import Options
 from selenium.webdriver.common.keys import Keys
 from selenium.webdriver.common.by import By
 import time
+from selenium.webdriver.support.ui import WebDriverWait
+from selenium.webdriver.support import expected_conditions as EC
 
-def aago_login(driver):
-    """
-    Logs into AAGO using credentials stored in Streamlit secrets.
-    MUST be called before scraping profile URLs and details.
-    """
+def aago_login(driver) -> bool:
+    wait = WebDriverWait(driver, 20)
 
-    login_url = "https://www.aago.org/login"
-
-    driver.get(login_url)
-    time.sleep(2)
+    driver.get("https://www.aago.org/login")
 
     email = st.secrets["AAGO_EMAIL"]
     password = st.secrets["AAGO_PASSWORD"]
 
-    # Identify login form fields
-    driver.find_element(By.ID, "email").send_keys(email)
-    driver.find_element(By.ID, "password").send_keys(password)
+    email_input = wait.until(
+        EC.presence_of_element_located(
+            (By.XPATH, "//input[contains(@type,'email')]")
+        )
+    )
+    password_input = wait.until(
+        EC.presence_of_element_located(
+            (By.XPATH, "//input[contains(@type,'password')]")
+        )
+    )
 
-    # Click login button
-    driver.find_element(By.CSS_SELECTOR, "button[type='submit']").click()
+    email_input.clear()
+    email_input.send_keys(email)
 
-    time.sleep(3)
+    password_input.clear()
+    password_input.send_keys(password)
+    password_input.send_keys(Keys.RETURN)
 
-    # OPTIONAL: Verify login
-    if "login" in driver.current_url.lower():
-        st.error("AAGO login failed — check credentials.")
-        return False
+    # Confirm authenticated session
+    wait.until(
+        EC.presence_of_element_located(
+            (By.XPATH, "//a[contains(@href,'logout') or contains(@href,'account')]")
+        )
+    )
 
     return True
 
@@ -479,104 +486,62 @@ def fetch_aago_urls(county_url):
 
 
 
-def fetch_aago_profile(url):
+def fetch_aago_profile(driver, url):
     """
-    Logs into AAGO, then scrapes an AAGO profile page to extract:
+    Scrapes an authenticated AAGO profile page to extract:
         • Phone number
         • Email placeholder ("CONTACT_FORM") if message button exists
+
+    Assumes:
+        ✔ driver is already logged in
+        ✔ driver session is authenticated
     """
-
-    chrome_options = Options()
-    chrome_options.add_argument("--headless=new")
-    chrome_options.add_argument("--disable-gpu")
-    chrome_options.add_argument("--no-sandbox")
-    chrome_options.add_argument("--disable-dev-shm-usage")
-
-    driver = webdriver.Chrome(options=chrome_options)
-
-    result = {"Phone": "", "Email": ""}
-
-    # 🔐 Credentials from DigitalOcean secrets
-    AAGO_EMAIL = st.secrets["AAGO_EMAIL"]
-    AAGO_PASSWORD = st.secrets["AAGO_PASSWORD"]
 
     PHONE_REGEX = re.compile(r"\(?\d{3}\)?[-.\s]?\d{3}[-.\s]?\d{4}")
 
+    result = {"Phone": "", "Email": ""}
+
     try:
-        # -------------------------------------------------
-        # 1️⃣ LOGIN
-        # -------------------------------------------------
-        driver.get("https://www.aago.org/login")
-        time.sleep(2)
-
-        email_input = driver.find_element(By.NAME, "Email")
-        password_input = driver.find_element(By.NAME, "Password")
-
-        email_input.clear()
-        email_input.send_keys(AAGO_EMAIL)
-
-        password_input.clear()
-        password_input.send_keys(AAGO_PASSWORD)
-        password_input.send_keys(Keys.RETURN)
-
-        # Allow redirect + session cookies
-        time.sleep(3)
-
-        # -------------------------------------------------
-        # 2️⃣ LOAD PROFILE PAGE (AUTHENTICATED)
-        # -------------------------------------------------
         driver.get(url)
         time.sleep(2)
 
-        # -------------------------------------------------
-        # 3️⃣ PHONE SCRAPING
-        # -------------------------------------------------
-        phone_found = ""
+        # -------------------------
+        # PHONE SCRAPING (scoped)
+        # -------------------------
+        info_blocks = driver.find_elements(
+            By.CSS_SELECTOR,
+            ".info-section p, .contact-info p"
+        )
 
-        elements = driver.find_elements(By.CSS_SELECTOR, "p, div, span")
-
-        for el in elements:
-            text = el.text.strip()
-            if PHONE_REGEX.search(text):
-                phone_found = PHONE_REGEX.search(text).group()
+        for el in info_blocks:
+            match = PHONE_REGEX.search(el.text)
+            if match:
+                result["Phone"] = match.group()
                 break
 
-        result["Phone"] = phone_found
-
-        # -------------------------------------------------
-        # 4️⃣ EMAIL / CONTACT FORM DETECTION
-        # -------------------------------------------------
-        try:
-            btns = driver.find_elements(By.TAG_NAME, "a")
-            for btn in btns:
-                if "message" in btn.text.lower():
-                    result["Email"] = "CONTACT_FORM"
-                    break
-        except:
-            pass
+        # -------------------------
+        # CONTACT FORM DETECTION
+        # -------------------------
+        for a in driver.find_elements(By.TAG_NAME, "a"):
+            if "message" in a.text.lower():
+                result["Email"] = "CONTACT_FORM"
+                break
 
         return result
 
     except Exception as e:
-        print("AAGO scrape error:", e)
+        print("AAGO profile scrape error:", e)
         return result
-
-    finally:
-        driver.quit()
-
-
-
-
-
-
-
 
 
 # ----------------------------------------------------
 # STREAMLIT UI
 # ----------------------------------------------------
 st.title("🏢 HOA Directory → Quickbase Import Tool")
-st.write("Upload a `.txt` or `.csv` directory export, and this tool will normalize it and prepare it for Quickbase import.")
+st.write(
+    "Upload a `.txt` or `.csv` directory export, and this tool will normalize it "
+    "and prepare it for Quickbase import."
+)
 
 uploaded_file = st.file_uploader("Upload HOA Directory File", type=["txt", "csv"])
 
@@ -592,7 +557,7 @@ if uploaded_file:
     st.info(f"Detected Association: **{detected_assoc}**")
 
     # -----------------------------
-    # Extract rows based on association
+    # Extract + normalize rows
     # -----------------------------
     detected_rows = extract_table_rows(raw_text, detected_assoc)
     rows = []
@@ -605,31 +570,47 @@ if uploaded_file:
     # -----------------------------
     # AAGO SPECIAL WORKFLOW
     # -----------------------------
-    if detected_assoc == "AAGO":
+    if detected_assoc == "AAGO" and rows:
         st.warning("AAGO directory detected — fetching profile details using Selenium...")
 
-        # Step A: Build URL map from county page
-        county_url = detect_aago_county_url(raw_text)  # <-- You must create this helper
-        url_map = fetch_aago_urls(county_url)
+        chrome_options = Options()
+        chrome_options.add_argument("--headless=new")
+        chrome_options.add_argument("--disable-gpu")
+        chrome_options.add_argument("--no-sandbox")
+        chrome_options.add_argument("--disable-dev-shm-usage")
 
-        # Step B: Inject real URLs into rows
-        for row in rows:
-            name = row["Company"]
-            if name in url_map:
-                row["URL"] = url_map[name]
+        driver = webdriver.Chrome(options=chrome_options)
 
-        # Step C: Fetch phone + email from each profile
-        progress = st.progress(0.0)
-        for i, row in enumerate(rows):
-            url = row.get("URL", "")
-            if url:
-                profile = fetch_aago_profile(url)   # <-- uses Selenium
-                row["Phone"] = profile.get("Phone", "")
-                row["Email"] = profile.get("Email", "")
+        try:
+            # 1️⃣ LOGIN ONCE
+            if not aago_login(driver):
+                st.error("Unable to log into AAGO. Scraping aborted.")
+            else:
+                # 2️⃣ BUILD URL MAP
+                county_url = detect_aago_county_url(raw_text)
+                url_map = fetch_aago_urls(county_url)
 
-            progress.progress((i + 1) / len(rows))
+                for row in rows:
+                    name = row["Company"]
+                    if name in url_map:
+                        row["URL"] = url_map[name]
 
-        st.success("AAGO profiles successfully scanned!")
+                # 3️⃣ SCRAPE PROFILES
+                progress = st.progress(0.0)
+
+                for i, row in enumerate(rows):
+                    url = row.get("URL")
+                    if url:
+                        profile = fetch_aago_profile(driver, url)
+                        row["Phone"] = profile.get("Phone", "")
+                        row["Email"] = profile.get("Email", "")
+
+                    progress.progress((i + 1) / len(rows))
+
+                st.success("AAGO profiles successfully scanned!")
+
+        finally:
+            driver.quit()
 
     # -----------------------------
     # Display results or error
@@ -648,7 +629,7 @@ if uploaded_file:
             label="⬇ Download Cleaned CSV",
             data=csv_bytes,
             file_name="hoa_cleaned.csv",
-            mime="text/csv"
+            mime="text/csv",
         )
 
         # -----------------------------
