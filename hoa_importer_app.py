@@ -406,6 +406,40 @@ from selenium.webdriver.common.by import By
 import time
 from selenium.webdriver.support.ui import WebDriverWait
 from selenium.webdriver.support import expected_conditions as EC
+import json
+
+def aago_cookie_login(driver) -> bool:
+    """
+    Authenticates Selenium by injecting pre-authenticated cookies.
+    """
+    driver.get("https://www.aago.org/")
+    time.sleep(1)
+
+    cookies = json.loads(st.secrets["AAGO_COOKIES"])
+
+    for cookie in cookies:
+        cookie_dict = {
+            "name": cookie["name"],
+            "value": cookie["value"],
+            "domain": cookie.get("domain", ".aago.org"),
+            "path": cookie.get("path", "/"),
+        }
+
+        if "secure" in cookie:
+            cookie_dict["secure"] = cookie["secure"]
+        if "httpOnly" in cookie:
+            cookie_dict["httpOnly"] = cookie["httpOnly"]
+
+        try:
+            driver.add_cookie(cookie_dict)
+        except Exception as e:
+            print("Cookie skipped:", e)
+
+    # Refresh → authenticated session
+    driver.refresh()
+    time.sleep(2)
+
+    return True
 
 def aago_login(driver) -> bool:
     wait = WebDriverWait(driver, 25)
