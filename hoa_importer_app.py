@@ -401,15 +401,42 @@ def send_to_quickbase(df: pd.DataFrame):
 
 from selenium import webdriver
 from selenium.webdriver.chrome.options import Options
+from selenium.webdriver.common.keys import Keys
 from selenium.webdriver.common.by import By
 import time
 
-def fetch_aago_urls(county_url):
+def aago_login(driver):
     """
-    Loads the AAGO county listing page and extracts real profile URLs.
-    Returns: dict { community_name : profile_url }
+    Logs into AAGO using credentials stored in Streamlit secrets.
+    MUST be called before scraping profile URLs and details.
     """
 
+    login_url = "https://www.aago.org/login"
+
+    driver.get(login_url)
+    time.sleep(2)
+
+    email = st.secrets["AAGO_EMAIL"]
+    password = st.secrets["AAGO_PASSWORD"]
+
+    # Identify login form fields
+    driver.find_element(By.ID, "email").send_keys(email)
+    driver.find_element(By.ID, "password").send_keys(password)
+
+    # Click login button
+    driver.find_element(By.CSS_SELECTOR, "button[type='submit']").click()
+
+    time.sleep(3)
+
+    # OPTIONAL: Verify login
+    if "login" in driver.current_url.lower():
+        st.error("AAGO login failed — check credentials.")
+        return False
+
+    return True
+
+
+def fetch_aago_urls(county_url):
     chrome_options = Options()
     chrome_options.add_argument("--headless=new")
     chrome_options.add_argument("--disable-gpu")
@@ -418,30 +445,28 @@ def fetch_aago_urls(county_url):
 
     driver = webdriver.Chrome(options=chrome_options)
 
-    results = {}
-
     try:
+        # LOGIN FIRST
+        if not aago_login(driver):
+            return {}
+
         driver.get(county_url)
         time.sleep(2)
 
-        # CORRECT SELECTOR — this is what AAGO uses now
         cards = driver.find_elements(By.CSS_SELECTOR, ".directory-item")
+
+        results = {}
 
         for card in cards:
             try:
-                name_el = card.find_element(By.CSS_SELECTOR, "h3")
-                link_el = card.find_element(By.CSS_SELECTOR, "a")
+                name = card.find_element(By.CSS_SELECTOR, "h3").text.strip()
+                href = card.find_element(By.CSS_SELECTOR, "a").get_attribute("href")
 
-                name = name_el.text.strip()
-                href = link_el.get_attribute("href")
-
-                # Fix relative URLs like "/OsceolaCounty/..."
                 if href.startswith("/"):
                     href = "https://www.aago.org" + href
 
                 results[name] = href
-
-            except Exception:
+            except:
                 continue
 
         return results
@@ -453,11 +478,12 @@ def fetch_aago_urls(county_url):
 
 
 
+
 def fetch_aago_profile(url):
     """
-    Scrapes AAGO profile pages to extract:
-        • Phone (from multiple possible layouts)
-        • Email placeholder ("CONTACT_FORM") if a message button exists
+    Logs into AAGO, then scrapes an AAGO profile page to extract:
+        • Phone number
+        • Email placeholder ("CONTACT_FORM") if message button exists
     """
 
     chrome_options = Options()
@@ -470,36 +496,62 @@ def fetch_aago_profile(url):
 
     result = {"Phone": "", "Email": ""}
 
-    PHONE_SELECTORS = [
-        ".info-section p",
-        ".info-section .mb-1",
-        ".contact-info p",
-        "p",
-    ]
+    # 🔐 Credentials from DigitalOcean secrets
+    AAGO_EMAIL = st.secrets["AAGO_EMAIL"]
+    AAGO_PASSWORD = st.secrets["AAGO_PASSWORD"]
+
+    PHONE_REGEX = re.compile(r"\(?\d{3}\)?[-.\s]?\d{3}[-.\s]?\d{4}")
 
     try:
+        # -------------------------------------------------
+        # 1️⃣ LOGIN
+        # -------------------------------------------------
+        driver.get("https://www.aago.org/login")
+        time.sleep(2)
+
+        email_input = driver.find_element(By.NAME, "Email")
+        password_input = driver.find_element(By.NAME, "Password")
+
+        email_input.clear()
+        email_input.send_keys(AAGO_EMAIL)
+
+        password_input.clear()
+        password_input.send_keys(AAGO_PASSWORD)
+        password_input.send_keys(Keys.RETURN)
+
+        # Allow redirect + session cookies
+        time.sleep(3)
+
+        # -------------------------------------------------
+        # 2️⃣ LOAD PROFILE PAGE (AUTHENTICATED)
+        # -------------------------------------------------
         driver.get(url)
         time.sleep(2)
 
+        # -------------------------------------------------
+        # 3️⃣ PHONE SCRAPING
+        # -------------------------------------------------
         phone_found = ""
 
-        for selector in PHONE_SELECTORS:
-            elems = driver.find_elements(By.CSS_SELECTOR, selector)
-            for el in elems:
-                text = el.text.strip()
-                if re.search(r"\(?\d{3}\)?[-.\s]?\d{3}[-.\s]?\d{4}", text):
-                    phone_found = text
-                    break
-            if phone_found:
+        elements = driver.find_elements(By.CSS_SELECTOR, "p, div, span")
+
+        for el in elements:
+            text = el.text.strip()
+            if PHONE_REGEX.search(text):
+                phone_found = PHONE_REGEX.search(text).group()
                 break
 
         result["Phone"] = phone_found
 
-        # Email is not exposed — but contact form exists
+        # -------------------------------------------------
+        # 4️⃣ EMAIL / CONTACT FORM DETECTION
+        # -------------------------------------------------
         try:
-            btn = driver.find_element(By.CSS_SELECTOR, "a.btn.btn-primary.btn-sm")
-            if "message" in btn.text.lower():
-                result["Email"] = "CONTACT_FORM"
+            btns = driver.find_elements(By.TAG_NAME, "a")
+            for btn in btns:
+                if "message" in btn.text.lower():
+                    result["Email"] = "CONTACT_FORM"
+                    break
         except:
             pass
 
@@ -511,6 +563,7 @@ def fetch_aago_profile(url):
 
     finally:
         driver.quit()
+
 
 
 
