@@ -406,7 +406,6 @@ from selenium.webdriver.common.by import By
 import time
 from selenium.webdriver.support.ui import WebDriverWait
 from selenium.webdriver.support import expected_conditions as EC
-from selenium.common.exceptions import TimeoutException, NoSuchElementException
 from selenium.common.exceptions import TimeoutException
 from selenium.webdriver.common.action_chains import ActionChains
 
@@ -467,12 +466,7 @@ def aago_password_login(driver) -> bool:
 
         # Try to click a submit button; fallback to ENTER
         submitted = False
-        for sel in (
-            "button[type='submit']",
-            "input[type='submit']",
-            "button[name*='login' i]",
-            "button[id*='login' i]",
-        ):
+        for sel in ("button[type='submit']", "input[type='submit']"):
             btns = driver.find_elements(By.CSS_SELECTOR, sel)
             btns = [b for b in btns if b.is_displayed() and b.is_enabled()]
             if btns:
@@ -482,6 +476,8 @@ def aago_password_login(driver) -> bool:
 
         if not submitted:
             pass_input.send_keys(Keys.ENTER)
+
+
 
         # Give it a moment to navigate
         time.sleep(3)
