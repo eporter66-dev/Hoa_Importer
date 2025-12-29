@@ -408,64 +408,100 @@ from selenium.webdriver.support.ui import WebDriverWait
 from selenium.webdriver.support import expected_conditions as EC
 
 
-def aago_cookie_login(driver) -> bool:
+def aago_password_login(driver) -> bool:
     """
-    Authenticates Selenium by injecting pre-authenticated AAGO cookies.
-    Adds debug output so you can see where you actually land (login vs logged in).
+    Logs into AAGO using username/password stored in Streamlit secrets.
+    Includes debug output for current_url so you can see redirects.
     """
     try:
-        # 1) Load the base domain first (required before add_cookie)
-        driver.get("https://www.aago.org/")
-        time.sleep(1)
-
-        st.write("AAGO step: loaded base page")
-        st.write("AAGO URL (base):", driver.current_url)
-
-        # 2) Load cookies from Streamlit secrets
-        if "AAGO_COOKIES" not in st.secrets:
-            st.error("Missing AAGO_COOKIES in Streamlit secrets.")
+        if "AAGO_EMAIL" not in st.secrets or "AAGO_PASSWORD" not in st.secrets:
+            st.error("Missing AAGO_EMAIL or AAGO_PASSWORD in Streamlit secrets.")
             return False
 
-        cookies = json.loads(st.secrets["AAGO_COOKIES"])
+        email = st.secrets["AAGO_EMAIL"]
+        password = st.secrets["AAGO_PASSWORD"]
 
-        # 3) Inject cookies (do NOT force domain unless the cookie includes it)
-        for cookie in cookies:
-            cookie_dict = {
-                "name": cookie["name"],
-                "value": cookie["value"],
-                "path": cookie.get("path", "/"),
-            }
-
-            # Only set domain if provided (host-only cookies break if you force a domain)
-            if cookie.get("domain"):
-                cookie_dict["domain"] = cookie["domain"]
-
-            # Pass through common optional fields if present
-            for k in ("secure", "httpOnly", "expiry", "sameSite"):
-                if cookie.get(k) is not None:
-                    cookie_dict[k] = cookie[k]
-
-            driver.add_cookie(cookie_dict)
-
-        st.write("AAGO step: cookies injected")
-        st.write("AAGO cookies now in browser:", [c["name"] for c in driver.get_cookies()][:15])
-
-        # 4) Refresh to apply authenticated session
-        driver.refresh()
+        # Start at home; we'll try to find a login link/form from there.
+        driver.get("https://www.aago.org/")
         time.sleep(2)
 
-        st.write("AAGO URL (after refresh):", driver.current_url)
+        st.write("AAGO URL (start):", driver.current_url)
 
-        # 5) Fail fast if we got redirected to login
-        if "login" in driver.current_url.lower():
-            st.error(f"AAGO appears unauthenticated (redirected to login): {driver.current_url}")
+        # Try to click a login/sign-in link if present
+        login_clicked = False
+        for link_text in ("Login", "Log In", "Sign In", "Member Login"):
+            try:
+                el = driver.find_element(By.LINK_TEXT, link_text)
+                el.click()
+                login_clicked = True
+                break
+            except Exception:
+                pass
+
+        if login_clicked:
+            time.sleep(2)
+            st.write("AAGO URL (after clicking login):", driver.current_url)
+
+        # Fill email/password using flexible selectors (works across many login pages)
+        wait = WebDriverWait(driver, 15)
+
+        user_input = wait.until(EC.presence_of_element_located((
+            By.CSS_SELECTOR,
+            "input[type='email'], input[name*='email' i], input[id*='email' i], "
+            "input[name*='user' i], input[id*='user' i], input[name*='login' i], input[id*='login' i]"
+        )))
+        pass_input = wait.until(EC.presence_of_element_located((
+            By.CSS_SELECTOR,
+            "input[type='password'], input[name*='pass' i], input[id*='pass' i]"
+        )))
+
+        user_input.clear()
+        user_input.send_keys(email)
+        pass_input.clear()
+        pass_input.send_keys(password)
+
+        # Submit: try common submit buttons, otherwise press Enter in password field
+        submitted = False
+        for sel in (
+            "button[type='submit']",
+            "input[type='submit']",
+            "button[name*='login' i]",
+            "button[id*='login' i]",
+            "button:contains('Login')"
+        ):
+            try:
+                btn = driver.find_element(By.CSS_SELECTOR, sel)
+                btn.click()
+                submitted = True
+                break
+            except Exception:
+                continue
+
+        if not submitted:
+            pass_input.send_keys(Keys.ENTER)
+
+        # Wait for navigation/settle
+        time.sleep(3)
+        st.write("AAGO URL (after submit):", driver.current_url)
+
+        # Heuristic: if we're still on a login-ish page, treat as failure
+        if any(x in driver.current_url.lower() for x in ("login", "signin", "account/login")):
+            st.error("Login appears to have failed (still on login page). Check credentials or selectors.")
             return False
+
+        # Optional: verify a logout link exists (stronger signal)
+        try:
+            driver.find_element(By.PARTIAL_LINK_TEXT, "Logout")
+            st.write("Detected Logout link → login likely succeeded.")
+        except Exception:
+            st.write("No Logout link found (may still be logged in depending on site UI).")
 
         return True
 
     except Exception as e:
-        st.error(f"AAGO cookie login failed: {e}")
+        st.error(f"AAGO password login failed: {e}")
         return False
+
 
 
 
@@ -617,7 +653,8 @@ if uploaded_file:
 
         try:
             # 1️⃣ LOGIN ONCE
-            if not aago_cookie_login(driver):
+            if not aago_password_login(driver):
+
                 st.error("Unable to log into AAGO. Scraping aborted.")
             else:
                 # 2️⃣ BUILD URL MAP
