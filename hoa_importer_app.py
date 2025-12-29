@@ -406,44 +406,67 @@ from selenium.webdriver.common.by import By
 import time
 from selenium.webdriver.support.ui import WebDriverWait
 from selenium.webdriver.support import expected_conditions as EC
-import json
+
 
 def aago_cookie_login(driver) -> bool:
     """
     Authenticates Selenium by injecting pre-authenticated AAGO cookies.
+    Adds debug output so you can see where you actually land (login vs logged in).
     """
     try:
-        # Must load domain before setting cookies
+        # 1) Load the base domain first (required before add_cookie)
         driver.get("https://www.aago.org/")
         time.sleep(1)
 
+        st.write("AAGO step: loaded base page")
+        st.write("AAGO URL (base):", driver.current_url)
+
+        # 2) Load cookies from Streamlit secrets
+        if "AAGO_COOKIES" not in st.secrets:
+            st.error("Missing AAGO_COOKIES in Streamlit secrets.")
+            return False
+
         cookies = json.loads(st.secrets["AAGO_COOKIES"])
 
+        # 3) Inject cookies (do NOT force domain unless the cookie includes it)
         for cookie in cookies:
             cookie_dict = {
                 "name": cookie["name"],
                 "value": cookie["value"],
-                "domain": cookie.get("domain", ".aago.org"),
                 "path": cookie.get("path", "/"),
             }
 
-            # Optional flags
-            if cookie.get("secure") is not None:
-                cookie_dict["secure"] = cookie["secure"]
-            if cookie.get("httpOnly") is not None:
-                cookie_dict["httpOnly"] = cookie["httpOnly"]
+            # Only set domain if provided (host-only cookies break if you force a domain)
+            if cookie.get("domain"):
+                cookie_dict["domain"] = cookie["domain"]
+
+            # Pass through common optional fields if present
+            for k in ("secure", "httpOnly", "expiry", "sameSite"):
+                if cookie.get(k) is not None:
+                    cookie_dict[k] = cookie[k]
 
             driver.add_cookie(cookie_dict)
 
-        # Reload page with authenticated session
+        st.write("AAGO step: cookies injected")
+        st.write("AAGO cookies now in browser:", [c["name"] for c in driver.get_cookies()][:15])
+
+        # 4) Refresh to apply authenticated session
         driver.refresh()
         time.sleep(2)
+
+        st.write("AAGO URL (after refresh):", driver.current_url)
+
+        # 5) Fail fast if we got redirected to login
+        if "login" in driver.current_url.lower():
+            st.error(f"AAGO appears unauthenticated (redirected to login): {driver.current_url}")
+            return False
 
         return True
 
     except Exception as e:
-        print("AAGO cookie login failed:", e)
+        st.error(f"AAGO cookie login failed: {e}")
         return False
+
 
 
 
@@ -453,6 +476,12 @@ def aago_cookie_login(driver) -> bool:
 def fetch_aago_urls(driver, county_url):
     driver.get(county_url)
     time.sleep(2)
+
+    st.write("AAGO URL (county page):", driver.current_url)
+
+    # If we got bounced to login here, cookies didn't apply to this host/path
+    if "login" in driver.current_url.lower():
+        raise RuntimeError(f"Redirected to login when opening county page: {driver.current_url}")
 
     results = {}
 
@@ -497,6 +526,11 @@ def fetch_aago_profile(driver, url):
         driver.get(url)
         time.sleep(2)
 
+        st.write("AAGO URL (profile):", driver.current_url)
+
+        if "login" in driver.current_url.lower():
+            raise RuntimeError(f"Redirected to login when opening profile: {driver.current_url}")
+
         # -------------------------
         # PHONE SCRAPING (scoped)
         # -------------------------
@@ -522,7 +556,7 @@ def fetch_aago_profile(driver, url):
         return result
 
     except Exception as e:
-        print("AAGO profile scrape error:", e)
+        st.error(f"AAGO profile scrape error: {e}")
         return result
 
 
@@ -588,7 +622,12 @@ if uploaded_file:
             else:
                 # 2️⃣ BUILD URL MAP
                 county_url = detect_aago_county_url(raw_text)
-                url_map = fetch_aago_urls(driver, county_url)
+                try:
+                    url_map = fetch_aago_urls(driver, county_url)
+                except Exception as e:
+                    st.error(f"Failed while loading county URL map: {e}")
+                    url_map = {}
+
 
                 for row in rows:
                     name = row["Company"]
