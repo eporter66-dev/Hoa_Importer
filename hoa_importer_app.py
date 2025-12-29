@@ -653,10 +653,10 @@ if uploaded_file:
         st.warning("AAGO directory detected — fetching profile details using Selenium...")
 
         chrome_options = Options()
-        ##chrome_options.add_argument("--headless=new")
-        chrome_options.add_argument("--disable-gpu")
+        chrome_options.add_argument("--headless=new")          # REQUIRED on Streamlit Cloud
         chrome_options.add_argument("--no-sandbox")
         chrome_options.add_argument("--disable-dev-shm-usage")
+        chrome_options.add_argument("--disable-gpu")
         chrome_options.add_argument("--window-size=1920,1080")
 
         chrome_options.add_argument(
@@ -664,6 +664,7 @@ if uploaded_file:
             "AppleWebKit/537.36 (KHTML, like Gecko) "
             "Chrome/122.0.0.0 Safari/537.36"
         )
+
 
 
         driver = webdriver.Chrome(options=chrome_options)
