@@ -410,98 +410,43 @@ import json
 
 def aago_cookie_login(driver) -> bool:
     """
-    Authenticates Selenium by injecting pre-authenticated cookies.
+    Authenticates Selenium by injecting pre-authenticated AAGO cookies.
     """
-    driver.get("https://www.aago.org/")
-    time.sleep(1)
-
-    cookies = json.loads(st.secrets["AAGO_COOKIES"])
-
-    for cookie in cookies:
-        cookie_dict = {
-            "name": cookie["name"],
-            "value": cookie["value"],
-            "domain": cookie.get("domain", ".aago.org"),
-            "path": cookie.get("path", "/"),
-        }
-
-        if "secure" in cookie:
-            cookie_dict["secure"] = cookie["secure"]
-        if "httpOnly" in cookie:
-            cookie_dict["httpOnly"] = cookie["httpOnly"]
-
-        try:
-            driver.add_cookie(cookie_dict)
-        except Exception as e:
-            print("Cookie skipped:", e)
-
-    # Refresh → authenticated session
-    driver.refresh()
-    time.sleep(2)
-
-    return True
-
-def aago_login(driver) -> bool:
-    wait = WebDriverWait(driver, 25)
-
-    driver.get("https://www.aago.org/login")
-
-    email = st.secrets["AAGO_EMAIL"]
-    password = st.secrets["AAGO_PASSWORD"]
-
     try:
-        # Wait for ANY input field to appear
-        wait.until(EC.presence_of_element_located((By.TAG_NAME, "input")))
+        # Must load domain before setting cookies
+        driver.get("https://www.aago.org/")
+        time.sleep(1)
 
-        inputs = driver.find_elements(By.TAG_NAME, "input")
+        cookies = json.loads(st.secrets["AAGO_COOKIES"])
 
-        email_input = None
-        password_input = None
+        for cookie in cookies:
+            cookie_dict = {
+                "name": cookie["name"],
+                "value": cookie["value"],
+                "domain": cookie.get("domain", ".aago.org"),
+                "path": cookie.get("path", "/"),
+            }
 
-        for inp in inputs:
-            itype = (inp.get_attribute("type") or "").lower()
-            name = (inp.get_attribute("name") or "").lower()
-            placeholder = (inp.get_attribute("placeholder") or "").lower()
+            # Optional flags
+            if cookie.get("secure") is not None:
+                cookie_dict["secure"] = cookie["secure"]
+            if cookie.get("httpOnly") is not None:
+                cookie_dict["httpOnly"] = cookie["httpOnly"]
 
-            if not email_input and (
-                "email" in itype
-                or "email" in name
-                or "email" in placeholder
-            ):
-                email_input = inp
+            driver.add_cookie(cookie_dict)
 
-            if not password_input and (
-                "password" in itype
-                or "password" in name
-                or "password" in placeholder
-            ):
-                password_input = inp
-
-        if not email_input or not password_input:
-            raise Exception("Login inputs not found on page")
-
-        email_input.clear()
-        email_input.send_keys(email)
-
-        password_input.clear()
-        password_input.send_keys(password)
-        password_input.send_keys(Keys.RETURN)
-
-        # Confirm login succeeded
-        wait.until(
-            EC.presence_of_element_located(
-                (
-                    By.XPATH,
-                    "//a[contains(@href,'logout') or contains(@href,'account') or contains(text(),'Logout')]"
-                )
-            )
-        )
+        # Reload page with authenticated session
+        driver.refresh()
+        time.sleep(2)
 
         return True
 
     except Exception as e:
-        st.error(f"AAGO login failed: {e}")
+        print("AAGO cookie login failed:", e)
         return False
+
+
+
 
 
 
@@ -638,7 +583,7 @@ if uploaded_file:
 
         try:
             # 1️⃣ LOGIN ONCE
-            if not aago_login(driver):
+            if not aago_cookie_login(driver):
                 st.error("Unable to log into AAGO. Scraping aborted.")
             else:
                 # 2️⃣ BUILD URL MAP
