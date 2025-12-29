@@ -407,9 +407,20 @@ import time
 from selenium.webdriver.support.ui import WebDriverWait
 from selenium.webdriver.support import expected_conditions as EC
 from selenium.common.exceptions import TimeoutException, NoSuchElementException
+from selenium.common.exceptions import TimeoutException
+from selenium.webdriver.common.action_chains import ActionChains
 
 
 def aago_password_login(driver) -> bool:
+    """
+    Logs into AAGO using AAGO_EMAIL / AAGO_PASSWORD from Streamlit secrets.
+
+    Robust strategy:
+      1) Go to /login directly
+      2) Wait for a password input (most reliable anchor)
+      3) Choose the closest preceding visible text/email input as the username field
+      4) Submit via submit button or ENTER
+    """
     try:
         if "AAGO_EMAIL" not in st.secrets or "AAGO_PASSWORD" not in st.secrets:
             st.error("Missing AAGO_EMAIL or AAGO_PASSWORD in Streamlit secrets.")
@@ -418,87 +429,91 @@ def aago_password_login(driver) -> bool:
         email = st.secrets["AAGO_EMAIL"]
         password = st.secrets["AAGO_PASSWORD"]
 
-        wait = WebDriverWait(driver, 20)
+        wait = WebDriverWait(driver, 30)
 
-        driver.get("https://www.aago.org/")
+        # Go straight to login page (we know it exists)
+        driver.get("https://www.aago.org/login")
         time.sleep(2)
-        st.write("AAGO URL (start):", driver.current_url)
-        st.write("AAGO Title (start):", driver.title)
 
-        # Try to navigate to a login page (many sites have a /login route)
-        # We'll try click-first, then direct URL fallback.
-        clicked = False
-        for text in ("Login", "Log In", "Sign In", "Member Login"):
-            try:
-                driver.find_element(By.LINK_TEXT, text).click()
-                clicked = True
-                break
-            except Exception:
-                pass
+        st.write("AAGO URL (login):", driver.current_url)
+        st.write("AAGO Title (login):", driver.title)
 
-        if not clicked:
-            # Direct fallback (harmless if it redirects)
-            driver.get("https://www.aago.org/login")
-            time.sleep(2)
-
-        st.write("AAGO URL (login attempt):", driver.current_url)
-        st.write("AAGO Title (login attempt):", driver.title)
-
-        # Wait for inputs (this is where most failures happen)
-        user_input = wait.until(EC.presence_of_element_located((
-            By.CSS_SELECTOR,
-            "input[type='email'], input[name*='email' i], input[id*='email' i], "
-            "input[name*='user' i], input[id*='user' i], input[name*='login' i], input[id*='login' i]"
-        )))
-        pass_input = wait.until(EC.presence_of_element_located((
-            By.CSS_SELECTOR,
-            "input[type='password'], input[name*='pass' i], input[id*='pass' i]"
+        # Wait for password field to exist + be interactable
+        pass_input = wait.until(EC.element_to_be_clickable((
+            By.CSS_SELECTOR, "input[type='password']"
         )))
 
-        user_input.clear()
+        # Find candidate username inputs: visible text/email inputs
+        candidates = driver.find_elements(By.CSS_SELECTOR, "input[type='email'], input[type='text']")
+        candidates = [c for c in candidates if c.is_displayed() and c.is_enabled()]
+
+        if not candidates:
+            st.error("Could not find a visible username/email input on the login page.")
+            st.code(driver.page_source[:2000])
+            return False
+
+        # Heuristic: pick the visible input that appears closest above the password field in the DOM
+        # (Often the username field is the last visible text/email input before password)
+        user_input = candidates[-1]
+
+        # Fill fields (use click + Ctrl+A to avoid masked/autofill issues)
+        user_input.click()
+        user_input.send_keys(Keys.CONTROL, "a")
         user_input.send_keys(email)
-        pass_input.clear()
+
+        pass_input.click()
+        pass_input.send_keys(Keys.CONTROL, "a")
         pass_input.send_keys(password)
 
-        # Submit
+        # Try to click a submit button; fallback to ENTER
         submitted = False
-        for sel in ("button[type='submit']", "input[type='submit']"):
-            try:
-                wait.until(EC.element_to_be_clickable((By.CSS_SELECTOR, sel))).click()
+        for sel in (
+            "button[type='submit']",
+            "input[type='submit']",
+            "button[name*='login' i]",
+            "button[id*='login' i]",
+        ):
+            btns = driver.find_elements(By.CSS_SELECTOR, sel)
+            btns = [b for b in btns if b.is_displayed() and b.is_enabled()]
+            if btns:
+                btns[0].click()
                 submitted = True
                 break
-            except Exception:
-                continue
 
         if not submitted:
             pass_input.send_keys(Keys.ENTER)
 
+        # Give it a moment to navigate
         time.sleep(3)
+
         st.write("AAGO URL (after submit):", driver.current_url)
         st.write("AAGO Title (after submit):", driver.title)
 
-        # Fail-fast if still on login-ish URL
-        if any(x in driver.current_url.lower() for x in ("login", "signin", "account/login")):
-            st.error(f"Login appears unsuccessful (still on login page): {driver.current_url}")
+        # If still on login, show a helpful snippet (often error banner is present)
+        if "login" in driver.current_url.lower():
+            st.error("Still on login page after submit — credentials may be wrong or login requires extra step.")
+            # Try to surface any visible error messages
+            possible_errors = driver.find_elements(By.CSS_SELECTOR, ".error, .validation-summary-errors, .alert, .message")
+            msgs = [e.text.strip() for e in possible_errors if e.is_displayed() and e.text.strip()]
+            if msgs:
+                st.write("Login page messages:", msgs[:3])
             return False
 
         return True
 
     except TimeoutException as e:
-        st.error(f"AAGO password login failed (Timeout waiting for login fields): {e}")
+        st.error(f"AAGO password login failed (Timeout): {e}")
         st.write("URL at failure:", driver.current_url)
         st.write("Title at failure:", driver.title)
-        st.code(driver.page_source[:1500])  # shows first chunk of HTML in Streamlit
+        st.code(driver.page_source[:2000])
         return False
 
     except Exception as e:
         st.error(f"AAGO password login failed: {e}")
         st.write("URL at failure:", driver.current_url)
         st.write("Title at failure:", driver.title)
-        st.code(driver.page_source[:1500])
+        st.code(driver.page_source[:2000])
         return False
-
-
 
 
 
