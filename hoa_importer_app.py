@@ -5,6 +5,9 @@ import csv
 import re
 import requests
 from io import StringIO
+import base64
+import os
+
 
 
 
@@ -408,7 +411,39 @@ from selenium.webdriver.support.ui import WebDriverWait
 from selenium.webdriver.support import expected_conditions as EC
 from selenium.common.exceptions import TimeoutException
 from selenium.webdriver.common.action_chains import ActionChains
+from selenium.webdriver.chrome.service import Service
 
+
+
+def find_password_in_shadow_dom(driver):
+    script = """
+    function firstPassword(root) {
+      if (!root) return null;
+
+      // Search within this root
+      try {
+        const el = root.querySelector && root.querySelector("input[type='password']");
+        if (el) return el;
+      } catch(e) {}
+
+      // Traverse element children
+      const kids = root.children || root.childNodes || [];
+      for (const k of kids) {
+        const found = firstPassword(k);
+        if (found) return found;
+      }
+
+      // Traverse shadow root
+      if (root.shadowRoot) {
+        const found = firstPassword(root.shadowRoot);
+        if (found) return found;
+      }
+
+      return null;
+    }
+    return firstPassword(document.documentElement);
+    """
+    return driver.execute_script(script)
 
 def _find_password_input_anywhere(driver, timeout=30):
     """
@@ -419,10 +454,17 @@ def _find_password_input_anywhere(driver, timeout=30):
 
     # 1) Try main document first
     try:
-        pass_input = wait.until(EC.presence_of_element_located((By.CSS_SELECTOR, "input[type='password']")))
+        pass_input = wait.until(
+            EC.presence_of_element_located((By.CSS_SELECTOR, "input[type='password']"))
+        )
         return pass_input, None
     except TimeoutException:
         pass
+
+    # ✅ 1.5) Try Shadow DOM (some sites render login inputs in web components)
+    shadow_pass = find_password_in_shadow_dom(driver)
+    if shadow_pass:
+        return shadow_pass, None
 
     # 2) Try iframes
     iframes = driver.find_elements(By.TAG_NAME, "iframe")
@@ -438,10 +480,38 @@ def _find_password_input_anywhere(driver, timeout=30):
             continue
 
     driver.switch_to.default_content()
-    raise TimeoutException("No password input found in main page or any iframe.")
+    raise TimeoutException("No password input found in main page, shadow DOM, or any iframe.")
+
+
+def st_screenshot(driver, label="screenshot"):
+    png = driver.get_screenshot_as_png()
+    st.markdown(f"**{label}**")
+    st.image(png, use_container_width=True)
+
+def st_bot_gate_signals(driver):
+    html = driver.page_source.lower()
+    tokens = ["recaptcha", "g-recaptcha", "hcaptcha", "cf-challenge", "cloudflare", "verify you are", "unusual traffic"]
+    found = [t for t in tokens if t in html]
+    st.write("Bot-gate signals found:", found)
+    return found
+
+
+
+
+
+
 
 def aago_password_login(driver) -> bool:
+    """
+    Logs into AAGO using AAGO_EMAIL / AAGO_PASSWORD from Streamlit secrets.
+
+    Requires helper functions defined elsewhere:
+      - _find_password_input_anywhere(driver, timeout=30) -> (pass_input, frame_index_or_None)
+      - st_screenshot(driver, label="...")  # shows what Selenium sees in Streamlit
+      - st_bot_gate_signals(driver)         # optional: detects recaptcha/hcaptcha/etc
+    """
     try:
+        # --- secrets check ---
         if "AAGO_EMAIL" not in st.secrets or "AAGO_PASSWORD" not in st.secrets:
             st.error("Missing AAGO_EMAIL or AAGO_PASSWORD in Streamlit secrets.")
             return False
@@ -449,27 +519,91 @@ def aago_password_login(driver) -> bool:
         email = st.secrets["AAGO_EMAIL"]
         password = st.secrets["AAGO_PASSWORD"]
 
+        wait = WebDriverWait(driver, 30)
+
+        # --- open login page and wait for full load ---
         driver.get("https://www.aago.org/login")
-        time.sleep(2)
+        wait.until(lambda d: d.execute_script("return document.readyState") == "complete")
+        time.sleep(1)  # small buffer for JS hydration
 
         st.write("AAGO URL (login):", driver.current_url)
         st.write("AAGO Title (login):", driver.title)
 
-        # Wait for password field anywhere (main DOM or iframe)
+        # --- debug: what does Selenium actually see? ---
+        try:
+            st_screenshot(driver, "AAGO login page (Selenium view)")
+        except Exception as _:
+            pass
+
+        # --- debug: bot-gate detection (often explains missing fields) ---
+        # --- debug: what does Selenium actually see? ---
+        
+
+        # --- debug: bot / captcha detection (do NOT abort on scripts alone) ---
+        try:
+            found_tokens = st_bot_gate_signals(driver)
+
+            # Only treat as fatal if an actual captcha widget/challenge is present
+            captcha_elements = driver.find_elements(
+                By.CSS_SELECTOR,
+                ".g-recaptcha, [data-sitekey], iframe[src*='recaptcha'], iframe[src*='hcaptcha']"
+            )
+
+            if captcha_elements:
+                st.error("Captcha widget detected. Headless Selenium cannot proceed.")
+                try:
+                    st_screenshot(driver, "Captcha widget detected")
+                except Exception:
+                    pass
+                return False
+
+            if found_tokens:
+                st.warning(
+                    "Captcha-related scripts detected, but no visible captcha widget found. "
+                    "Continuing login attempt…"
+            )
+
+        except Exception:
+            # Never fail login just because debug detection errored
+            pass
+
+
+        # --- find password field (main doc or iframe) ---
         pass_input, frame_index = _find_password_input_anywhere(driver, timeout=30)
         st.write("Password field found in:", "main page" if frame_index is None else f"iframe #{frame_index}")
 
-        # Find user field in the SAME context we’re currently in
-        candidates = driver.find_elements(By.CSS_SELECTOR, "input[type='email'], input[type='text']")
-        candidates = [c for c in candidates if c.is_displayed() and c.is_enabled()]
-        if not candidates:
-            st.error("Could not find a visible username/email field (main or iframe).")
+        # We are currently *in the correct context* (iframe if needed) because
+        # _find_password_input_anywhere switches into the iframe before returning.
+        # So from here onward, do NOT switch_to.default_content() until after submit.
+
+        # --- locate username/email field robustly ---
+        # Prefer: find a text/email input in the same form/container as the password field.
+        user_input = None
+
+        # 1) Try nearest form ancestor
+        try:
+            form = pass_input.find_element(By.XPATH, "ancestor::form[1]")
+            candidates = form.find_elements(By.CSS_SELECTOR, "input[type='email'], input[type='text']")
+            candidates = [c for c in candidates if c.is_displayed() and c.is_enabled()]
+            if candidates:
+                user_input = candidates[0]
+        except Exception:
+            pass
+
+        # 2) Fallback: any visible email/text input in current context (iframe or main)
+        if user_input is None:
+            candidates = driver.find_elements(By.CSS_SELECTOR, "input[type='email'], input[type='text']")
+            candidates = [c for c in candidates if c.is_displayed() and c.is_enabled()]
+            if candidates:
+                # heuristic: pick the one closest above password in DOM order by picking the last
+                user_input = candidates[-1]
+
+        if user_input is None:
+            st.error("Could not find a visible username/email input (in same context as password).")
             st.code(driver.page_source[:2500])
             return False
 
-        user_input = candidates[-1]  # heuristic
-
-        # Fill in user + pass (presence is enough; don’t require clickable)
+        # --- fill fields ---
         driver.execute_script("arguments[0].scrollIntoView({block:'center'});", user_input)
         user_input.click()
         user_input.send_keys(Keys.CONTROL, "a")
@@ -480,45 +614,95 @@ def aago_password_login(driver) -> bool:
         pass_input.send_keys(Keys.CONTROL, "a")
         pass_input.send_keys(password)
 
-        # Submit: click submit if it exists, else ENTER
+        # --- submit (prefer clicking submit within same form/context) ---
         submitted = False
-        for sel in ("button[type='submit']", "input[type='submit']"):
-            btns = driver.find_elements(By.CSS_SELECTOR, sel)
-            btns = [b for b in btns if b.is_displayed() and b.is_enabled()]
-            if btns:
-                btns[0].click()
-                submitted = True
-                break
 
+        # 1) Click submit button within form (best)
+        try:
+            form = pass_input.find_element(By.XPATH, "ancestor::form[1]")
+            submit_btns = form.find_elements(By.CSS_SELECTOR, "button[type='submit'], input[type='submit']")
+            submit_btns = [b for b in submit_btns if b.is_displayed() and b.is_enabled()]
+            if submit_btns:
+                submit_btns[0].click()
+                submitted = True
+        except Exception:
+            pass
+
+        # 2) Fallback: any clickable submit in current context
+        if not submitted:
+            for sel in ("button[type='submit']", "input[type='submit']"):
+                btns = driver.find_elements(By.CSS_SELECTOR, sel)
+                btns = [b for b in btns if b.is_displayed() and b.is_enabled()]
+                if btns:
+                    btns[0].click()
+                    submitted = True
+                    break
+
+        # 3) Final fallback: ENTER on password field
         if not submitted:
             pass_input.send_keys(Keys.ENTER)
 
-        time.sleep(3)
+        # --- wait for navigation or auth state change ---
+        time.sleep(2)
 
-        # After submit, go back to default content to read URL reliably
+        # Return to top-level document for URL/title checks
         driver.switch_to.default_content()
         st.write("AAGO URL (after submit):", driver.current_url)
         st.write("AAGO Title (after submit):", driver.title)
 
+        # Optional: screenshot after submit
+        try:
+            st_screenshot(driver, "After login submit (Selenium view)")
+        except Exception as _:
+            pass
+
+        # If still on login page, surface any error messages
         if "login" in driver.current_url.lower():
             st.error("Still on login page after submit.")
+            try:
+                errors = driver.find_elements(By.CSS_SELECTOR, ".error, .validation-summary-errors, .alert, .message")
+                msgs = [e.text.strip() for e in errors if e.is_displayed() and e.text.strip()]
+                if msgs:
+                    st.write("Login page messages:", msgs[:5])
+            except Exception:
+                pass
             return False
 
         return True
 
     except TimeoutException as e:
+        # Ensure we're in default content for consistent debug output
+        try:
+            driver.switch_to.default_content()
+        except Exception:
+            pass
+
         st.error(f"AAGO password login failed (Timeout): {e}")
         st.write("URL at failure:", driver.current_url)
         st.write("Title at failure:", driver.title)
+        try:
+            st_screenshot(driver, "Timeout failure (Selenium view)")
+        except Exception:
+            pass
         st.code(driver.page_source[:2500])
         return False
 
     except Exception as e:
+        try:
+            driver.switch_to.default_content()
+        except Exception:
+            pass
+
         st.error(f"AAGO password login failed: {e}")
         st.write("URL at failure:", driver.current_url)
         st.write("Title at failure:", driver.title)
+        try:
+            st_screenshot(driver, "Exception failure (Selenium view)")
+        except Exception:
+            pass
         st.code(driver.page_source[:2500])
         return False
+
 
 
 
@@ -653,21 +837,26 @@ if uploaded_file:
         st.warning("AAGO directory detected — fetching profile details using Selenium...")
 
         chrome_options = Options()
-        chrome_options.add_argument("--headless=new")          # REQUIRED on Streamlit Cloud
+        chrome_options.add_argument("--headless=new")
         chrome_options.add_argument("--no-sandbox")
         chrome_options.add_argument("--disable-dev-shm-usage")
         chrome_options.add_argument("--disable-gpu")
         chrome_options.add_argument("--window-size=1920,1080")
 
-        chrome_options.add_argument(
-            "--user-agent=Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
-            "AppleWebKit/537.36 (KHTML, like Gecko) "
-            "Chrome/122.0.0.0 Safari/537.36"
-        )
+        # These two help Chrome not crash in containerized envs
+        chrome_options.add_argument("--remote-debugging-port=9222")
+        chrome_options.add_argument("--disable-software-rasterizer")
 
+        # Give Chrome a writable profile dir (helps a lot on Streamlit Cloud)
+        chrome_options.add_argument("--user-data-dir=/tmp/chrome")
+        chrome_options.add_argument("--data-path=/tmp/chrome")
+        chrome_options.add_argument("--disk-cache-dir=/tmp/chrome-cache")
 
+        os.makedirs("/tmp/chrome", exist_ok=True)
+        os.makedirs("/tmp/chrome-cache", exist_ok=True)
 
-        driver = webdriver.Chrome(options=chrome_options)
+        driver = webdriver.Chrome(service=Service(), options=chrome_options)
+
 
         try:
             # 1️⃣ LOGIN ONCE
