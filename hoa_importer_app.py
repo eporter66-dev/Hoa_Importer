@@ -447,42 +447,7 @@ def find_password_in_shadow_dom(driver):
     """
     return driver.execute_script(script)
 
-def _find_password_input_anywhere(driver, timeout=30):
-    """
-    Returns (pass_input, frame_index or None).
-    If frame_index is not None, Selenium is already switched into that iframe.
-    """
-    wait = WebDriverWait(driver, timeout)
 
-    # 1) Try main document first
-    try:
-        pass_input = wait.until(
-            EC.presence_of_element_located((By.CSS_SELECTOR, "input[type='password']"))
-        )
-        return pass_input, None
-    except TimeoutException:
-        pass
-
-    # ✅ 1.5) Try Shadow DOM (some sites render login inputs in web components)
-    shadow_pass = find_password_in_shadow_dom(driver)
-    if shadow_pass:
-        return shadow_pass, None
-
-    # 2) Try iframes
-    iframes = driver.find_elements(By.TAG_NAME, "iframe")
-    for i, iframe in enumerate(iframes):
-        try:
-            driver.switch_to.default_content()
-            driver.switch_to.frame(iframe)
-            pass_inputs = driver.find_elements(By.CSS_SELECTOR, "input[type='password']")
-            visible = [p for p in pass_inputs if p.is_displayed()]
-            if visible:
-                return visible[0], i
-        except Exception:
-            continue
-
-    driver.switch_to.default_content()
-    raise TimeoutException("No password input found in main page, shadow DOM, or any iframe.")
 
 
 def st_screenshot(driver, label="screenshot"):
@@ -1027,6 +992,13 @@ if uploaded_file:
         # Use unique profile/cache dirs
         chrome_options.add_argument(f"--user-data-dir={profile_dir}")
         chrome_options.add_argument(f"--disk-cache-dir={cache_dir}")
+
+        chrome_options.add_argument(
+            "--user-agent=Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+            "AppleWebKit/537.36 (KHTML, like Gecko) "
+            "Chrome/122.0.0.0 Safari/537.36"
+        )
+
 
         
 
