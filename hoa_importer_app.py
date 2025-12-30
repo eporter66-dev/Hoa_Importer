@@ -412,6 +412,8 @@ from selenium.webdriver.support import expected_conditions as EC
 from selenium.common.exceptions import TimeoutException
 from selenium.webdriver.common.action_chains import ActionChains
 from selenium.webdriver.chrome.service import Service
+import tempfile
+import shutil
 
 
 
@@ -502,16 +504,7 @@ def st_bot_gate_signals(driver):
 
 
 def aago_password_login(driver) -> bool:
-    """
-    Logs into AAGO using AAGO_EMAIL / AAGO_PASSWORD from Streamlit secrets.
-
-    Requires helper functions defined elsewhere:
-      - _find_password_input_anywhere(driver, timeout=30) -> (pass_input, frame_index_or_None)
-      - st_screenshot(driver, label="...")  # shows what Selenium sees in Streamlit
-      - st_bot_gate_signals(driver)         # optional: detects recaptcha/hcaptcha/etc
-    """
     try:
-        # --- secrets check ---
         if "AAGO_EMAIL" not in st.secrets or "AAGO_PASSWORD" not in st.secrets:
             st.error("Missing AAGO_EMAIL or AAGO_PASSWORD in Streamlit secrets.")
             return False
@@ -521,66 +514,57 @@ def aago_password_login(driver) -> bool:
 
         wait = WebDriverWait(driver, 30)
 
-        # --- open login page and wait for full load ---
         driver.get("https://www.aago.org/login")
+
+        # Wait for initial HTML + JS hydration
         wait.until(lambda d: d.execute_script("return document.readyState") == "complete")
-        time.sleep(1)  # small buffer for JS hydration
+        time.sleep(2)
 
         st.write("AAGO URL (login):", driver.current_url)
         st.write("AAGO Title (login):", driver.title)
 
-        # --- debug: what does Selenium actually see? ---
+        # Screenshot what Selenium sees (helps confirm cookie banner / bot gate / blank form)
         try:
             st_screenshot(driver, "AAGO login page (Selenium view)")
-        except Exception as _:
+        except Exception:
             pass
 
-        # --- debug: bot-gate detection (often explains missing fields) ---
-        # --- debug: what does Selenium actually see? ---
-        
-
-        # --- debug: bot / captcha detection (do NOT abort on scripts alone) ---
+        # Bot/captcha signals: don't fail based on scripts alone
         try:
             found_tokens = st_bot_gate_signals(driver)
 
-            # Only treat as fatal if an actual captcha widget/challenge is present
             captcha_elements = driver.find_elements(
                 By.CSS_SELECTOR,
                 ".g-recaptcha, [data-sitekey], iframe[src*='recaptcha'], iframe[src*='hcaptcha']"
             )
 
-            if captcha_elements:
-                st.error("Captcha widget detected. Headless Selenium cannot proceed.")
+            captcha_visible = [e for e in captcha_elements if e.is_displayed()]
+            if captcha_visible:
+                st.error("Captcha widget detected (visible). Headless Selenium cannot proceed.")
                 try:
-                    st_screenshot(driver, "Captcha widget detected")
+                    st_screenshot(driver, "Captcha widget detected (visible)")
                 except Exception:
                     pass
                 return False
+
 
             if found_tokens:
                 st.warning(
                     "Captcha-related scripts detected, but no visible captcha widget found. "
                     "Continuing login attempt…"
-            )
-
+                )
         except Exception:
-            # Never fail login just because debug detection errored
             pass
 
-
-        # --- find password field (main doc or iframe) ---
+        # Find password field (main DOM → shadow DOM → iframes)
         pass_input, frame_index = _find_password_input_anywhere(driver, timeout=30)
         st.write("Password field found in:", "main page" if frame_index is None else f"iframe #{frame_index}")
 
-        # We are currently *in the correct context* (iframe if needed) because
-        # _find_password_input_anywhere switches into the iframe before returning.
-        # So from here onward, do NOT switch_to.default_content() until after submit.
+        # IMPORTANT: we must stay in the same context as pass_input here
+        # (iframe context is already set by _find_password_input_anywhere)
 
-        # --- locate username/email field robustly ---
-        # Prefer: find a text/email input in the same form/container as the password field.
+        # Find username input preferably in same form
         user_input = None
-
-        # 1) Try nearest form ancestor
         try:
             form = pass_input.find_element(By.XPATH, "ancestor::form[1]")
             candidates = form.find_elements(By.CSS_SELECTOR, "input[type='email'], input[type='text']")
@@ -590,20 +574,18 @@ def aago_password_login(driver) -> bool:
         except Exception:
             pass
 
-        # 2) Fallback: any visible email/text input in current context (iframe or main)
         if user_input is None:
             candidates = driver.find_elements(By.CSS_SELECTOR, "input[type='email'], input[type='text']")
             candidates = [c for c in candidates if c.is_displayed() and c.is_enabled()]
             if candidates:
-                # heuristic: pick the one closest above password in DOM order by picking the last
                 user_input = candidates[-1]
 
         if user_input is None:
-            st.error("Could not find a visible username/email input (in same context as password).")
+            st.error("Could not find a visible username/email input (same context as password).")
             st.code(driver.page_source[:2500])
             return False
 
-        # --- fill fields ---
+        # Fill user/pass
         driver.execute_script("arguments[0].scrollIntoView({block:'center'});", user_input)
         user_input.click()
         user_input.send_keys(Keys.CONTROL, "a")
@@ -614,10 +596,8 @@ def aago_password_login(driver) -> bool:
         pass_input.send_keys(Keys.CONTROL, "a")
         pass_input.send_keys(password)
 
-        # --- submit (prefer clicking submit within same form/context) ---
+        # Submit (prefer submit inside same form)
         submitted = False
-
-        # 1) Click submit button within form (best)
         try:
             form = pass_input.find_element(By.XPATH, "ancestor::form[1]")
             submit_btns = form.find_elements(By.CSS_SELECTOR, "button[type='submit'], input[type='submit']")
@@ -628,55 +608,32 @@ def aago_password_login(driver) -> bool:
         except Exception:
             pass
 
-        # 2) Fallback: any clickable submit in current context
-        if not submitted:
-            for sel in ("button[type='submit']", "input[type='submit']"):
-                btns = driver.find_elements(By.CSS_SELECTOR, sel)
-                btns = [b for b in btns if b.is_displayed() and b.is_enabled()]
-                if btns:
-                    btns[0].click()
-                    submitted = True
-                    break
-
-        # 3) Final fallback: ENTER on password field
         if not submitted:
             pass_input.send_keys(Keys.ENTER)
 
-        # --- wait for navigation or auth state change ---
-        time.sleep(2)
+        time.sleep(3)
 
-        # Return to top-level document for URL/title checks
+        # Back to top-level doc for URL/title checks
         driver.switch_to.default_content()
         st.write("AAGO URL (after submit):", driver.current_url)
         st.write("AAGO Title (after submit):", driver.title)
 
-        # Optional: screenshot after submit
         try:
             st_screenshot(driver, "After login submit (Selenium view)")
-        except Exception as _:
+        except Exception:
             pass
 
-        # If still on login page, surface any error messages
         if "login" in driver.current_url.lower():
             st.error("Still on login page after submit.")
-            try:
-                errors = driver.find_elements(By.CSS_SELECTOR, ".error, .validation-summary-errors, .alert, .message")
-                msgs = [e.text.strip() for e in errors if e.is_displayed() and e.text.strip()]
-                if msgs:
-                    st.write("Login page messages:", msgs[:5])
-            except Exception:
-                pass
             return False
 
         return True
 
     except TimeoutException as e:
-        # Ensure we're in default content for consistent debug output
         try:
             driver.switch_to.default_content()
         except Exception:
             pass
-
         st.error(f"AAGO password login failed (Timeout): {e}")
         st.write("URL at failure:", driver.current_url)
         st.write("Title at failure:", driver.title)
@@ -692,7 +649,6 @@ def aago_password_login(driver) -> bool:
             driver.switch_to.default_content()
         except Exception:
             pass
-
         st.error(f"AAGO password login failed: {e}")
         st.write("URL at failure:", driver.current_url)
         st.write("Title at failure:", driver.title)
@@ -702,6 +658,7 @@ def aago_password_login(driver) -> bool:
             pass
         st.code(driver.page_source[:2500])
         return False
+
 
 
 
@@ -836,37 +793,45 @@ if uploaded_file:
     if detected_assoc == "AAGO" and rows:
         st.warning("AAGO directory detected — fetching profile details using Selenium...")
 
+        # ---- create unique writable dirs per run (prevents /tmp collisions) ----
+        profile_dir = tempfile.mkdtemp(prefix="chrome-profile-")
+        cache_dir   = tempfile.mkdtemp(prefix="chrome-cache-")
+
         chrome_options = Options()
+        
+        chrome_options.add_argument("--disable-cache")
+
         chrome_options.add_argument("--headless=new")
         chrome_options.add_argument("--no-sandbox")
         chrome_options.add_argument("--disable-dev-shm-usage")
         chrome_options.add_argument("--disable-gpu")
         chrome_options.add_argument("--window-size=1920,1080")
 
-        # These two help Chrome not crash in containerized envs
-        chrome_options.add_argument("--remote-debugging-port=9222")
+        # Helps stability in container envs
+        chrome_options.add_argument("--remote-debugging-port=0")  # let Chrome pick a free port
         chrome_options.add_argument("--disable-software-rasterizer")
 
-        # Give Chrome a writable profile dir (helps a lot on Streamlit Cloud)
-        chrome_options.add_argument("--user-data-dir=/tmp/chrome")
-        chrome_options.add_argument("--data-path=/tmp/chrome")
-        chrome_options.add_argument("--disk-cache-dir=/tmp/chrome-cache")
+        # Use unique profile/cache dirs
+        chrome_options.add_argument(f"--user-data-dir={profile_dir}")
+        chrome_options.add_argument(f"--disk-cache-dir={cache_dir}")
 
-        os.makedirs("/tmp/chrome", exist_ok=True)
-        os.makedirs("/tmp/chrome-cache", exist_ok=True)
+        # Strongly recommended for bot-gate avoidance
+        chrome_options.add_argument(
+            "--user-agent=Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+            "AppleWebKit/537.36 (KHTML, like Gecko) "
+            "Chrome/122.0.0.0 Safari/537.36"
+        )
 
-        driver = webdriver.Chrome(service=Service(), options=chrome_options)
-
-
+        driver = None
         try:
-            # 1️⃣ LOGIN ONCE
+            driver = webdriver.Chrome(service=Service(), options=chrome_options)
+
+            # 1) LOGIN ONCE
             st.write("Starting AAGO password login…")
-
             if not aago_password_login(driver):
-
                 st.error("Unable to log into AAGO. Scraping aborted.")
             else:
-                # 2️⃣ BUILD URL MAP
+                # 2) BUILD URL MAP
                 county_url = detect_aago_county_url(raw_text)
                 try:
                     url_map = fetch_aago_urls(driver, county_url)
@@ -874,28 +839,38 @@ if uploaded_file:
                     st.error(f"Failed while loading county URL map: {e}")
                     url_map = {}
 
-
                 for row in rows:
                     name = row["Company"]
                     if name in url_map:
                         row["URL"] = url_map[name]
 
-                # 3️⃣ SCRAPE PROFILES
+                # 3) SCRAPE PROFILES
                 progress = st.progress(0.0)
-
                 for i, row in enumerate(rows):
                     url = row.get("URL")
                     if url:
                         profile = fetch_aago_profile(driver, url)
                         row["Phone"] = profile.get("Phone", "")
                         row["Email"] = profile.get("Email", "")
-
                     progress.progress((i + 1) / len(rows))
 
                 st.success("AAGO profiles successfully scanned!")
 
         finally:
-            driver.quit()
+            # quit chrome cleanly
+            try:
+                if driver:
+                    driver.quit()
+            except Exception:
+                pass
+
+            # remove temp dirs
+            try:
+                shutil.rmtree(profile_dir, ignore_errors=True)
+                shutil.rmtree(cache_dir, ignore_errors=True)
+            except Exception:
+                pass
+
 
     # -----------------------------
     # Display results or error
