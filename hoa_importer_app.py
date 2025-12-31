@@ -465,6 +465,103 @@ def st_bot_gate_signals(driver):
 
 
 
+def _find_email_input_anywhere(driver, timeout=20):
+    """
+    Returns (email_input, frame_index_or_None).
+    If frame_index is not None, driver is left switched into that iframe.
+    """
+    wait = WebDriverWait(driver, timeout)
+
+    selectors = [
+        "input[type='email']",
+        "input[autocomplete='username']",
+        "input[name*='email' i]",
+        "input[id*='email' i]",
+        "input[placeholder*='email' i]",
+        "input[aria-label*='email' i]",
+        "input[type='text']",
+    ]
+
+    # 1) main document
+    driver.switch_to.default_content()
+    for sel in selectors:
+        try:
+            el = wait.until(EC.visibility_of_element_located((By.CSS_SELECTOR, sel)))
+            if el.is_displayed() and el.is_enabled():
+                return el, None
+        except Exception:
+            pass
+
+    # 2) iframes
+    driver.switch_to.default_content()
+    iframes = driver.find_elements(By.TAG_NAME, "iframe")
+    for i, iframe in enumerate(iframes):
+        try:
+            driver.switch_to.default_content()
+            driver.switch_to.frame(iframe)
+
+            for sel in selectors:
+                els = driver.find_elements(By.CSS_SELECTOR, sel)
+                els = [e for e in els if e.is_displayed() and e.is_enabled()]
+                if els:
+                    return els[0], i
+        except Exception:
+            continue
+
+    driver.switch_to.default_content()
+    raise TimeoutException("No visible email input found in main page or any iframe.")
+
+
+def _fill_email_reliably(driver, el, email: str) -> str:
+    """Fill email and ensure it 'sticks' (click + clear + send_keys + JS value + input/change events)."""
+
+    # scroll + click
+    driver.execute_script("arguments[0].scrollIntoView({block:'center'});", el)
+    time.sleep(0.2)
+    try:
+        el.click()
+    except Exception:
+        driver.execute_script("arguments[0].click();", el)
+
+    # clear
+    try:
+        el.clear()
+    except Exception:
+        pass
+    try:
+        el.send_keys(Keys.CONTROL, "a")
+        el.send_keys(Keys.DELETE)
+    except Exception:
+        pass
+
+    # type first (some sites only “activate” validation on real keystrokes)
+    try:
+        el.send_keys(email)
+    except Exception:
+        pass
+    time.sleep(0.2)
+
+    # then force value + events (safe InputEvent fallback)
+    driver.execute_script(
+        """
+        const el = arguments[0];
+        const val = arguments[1];
+        el.focus();
+        el.value = val;
+
+        try {
+          el.dispatchEvent(new InputEvent('input', { bubbles: true }));
+        } catch (e) {
+          el.dispatchEvent(new Event('input', { bubbles: true }));
+        }
+        el.dispatchEvent(new Event('change', { bubbles: true }));
+        """,
+        el, email
+    )
+
+    time.sleep(0.2)
+    return (el.get_attribute("value") or "").strip()
+
 
 
 
@@ -572,6 +669,8 @@ def aago_password_login(driver) -> bool:
             "input[id*='pass' i]",
             "input[aria-label*='pass' i]",
             "input[placeholder*='pass' i]",
+            "input[autocomplete='password']",
+
         ]
 
         # --- 1) Main document: wait for any selector to become visible ---
@@ -695,26 +794,56 @@ def aago_password_login(driver) -> bool:
         # --------------------------
         # STEP 1: Email + Continue
         # --------------------------
+        # --------------------------
+
         driver.switch_to.default_content()
 
-        email_input = _find_email_input(timeout=15)
-        if email_input is None:
-            st.error("Could not find the Email input on the login page.")
-            st.code(driver.page_source[:2500])
-            return False
+        # Try to dismiss the "out of date" banner / cookie bars if they steal focus
+        try:
+            driver.execute_script("window.scrollTo(0, 0);")
+            _click_by_text_any(["IGNORE", "CLOSE", "ACCEPT", "ACKNOWLEDGE", "I AGREE", "GOT IT"], timeout=2)
+        except Exception:
+            pass
 
-        _fill_input(email_input, email)
+        # Find email input across main DOM + iframes
+        email_input, email_frame = _find_email_input_anywhere(driver, timeout=20)
+        st.write("Email field found in:", "main page" if email_frame is None else f"iframe #{email_frame}")
 
-        # Click Continue (by text preferred)
-        clicked_continue = _click_by_text_any(["CONTINUE", "NEXT"], timeout=4)
+        filled_val = _fill_email_reliably(driver, email_input, email)
+
+        # Prove it worked
+        try:
+            st_screenshot(driver, "After filling email (verify visible value)")
+        except Exception:
+            pass
+
+        st.write("Email value read back:", repr(filled_val))
+
+        # HARD STOP if it didn't stick (prevents clicking Continue with empty email)
+        if not filled_val or "@" not in filled_val:
+            raise RuntimeError("Email did not populate (value still blank) — cannot proceed.")
+
+        # Now click Continue
+        clicked_continue = _click_by_text_any(["CONTINUE", "NEXT"], timeout=2)
+
+        # If we were in an iframe, the Continue button might be outside it
+        if not clicked_continue and email_frame is not None:
+            driver.switch_to.default_content()
+            clicked_continue = _click_by_text_any(["CONTINUE", "NEXT"], timeout=3)
+
         if not clicked_continue:
-            clicked_continue = _safe_click_any_css(["button[type='submit']", "input[type='submit']"], timeout=3)
+            clicked_continue = _safe_click_any_css(
+                ["button[type='submit']", "input[type='submit']", "button"],
+                timeout=3
+            )
+
         if not clicked_continue:
-            # Last resort: ENTER on email input
             try:
                 email_input.send_keys(Keys.ENTER)
             except Exception:
                 pass
+
+        driver.switch_to.default_content()
 
         # Wait for password step to *actually* render (avoid fixed sleeps only)
         # This also helps when the password step is an iframe created after Continue.
