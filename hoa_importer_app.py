@@ -314,7 +314,7 @@ def parse_row(parts, detected_assoc):
             "Units": "",
             "URL": profile_url,    # required for Selenium phone scraping
             "Association": detected_assoc,
-            "Member Type": "Owner",
+            "Member Type": "Member"
         }
 
     # ----------------------------------------------------
@@ -352,7 +352,7 @@ def parse_row(parts, detected_assoc):
         "Units": units,
         "URL": profile_url,
         "Association": detected_assoc,
-        "Member Type": "Owner",
+        "Member Type": "Member",
     }
 
 
@@ -570,16 +570,6 @@ def aago_password_login(driver) -> bool:
     Logs into AAGO (2-step):
       Step 1: Email + Continue
       Step 2: Password appears + submit
-
-    Assumes these helpers already exist in your app (as in your earlier code):
-      - st_screenshot(driver, label)
-      - st_bot_gate_signals(driver)
-      - find_password_in_shadow_dom(driver)   # optional (used by the finder below)
-
-    This function is intentionally defensive because the password step may:
-      - appear after a JS transition,
-      - render inside an iframe that only exists AFTER Continue,
-      - use nonstandard attributes (autocomplete/current-password, name/id contains pass, etc.)
     """
     # -----------------------------
     # Small helpers
@@ -611,57 +601,11 @@ def aago_password_login(driver) -> bool:
             time.sleep(0.2)
         return False
 
-    def _safe_click_any_css(selectors, timeout=6) -> bool:
-        """Click first visible+enabled element matching any CSS selector."""
-        end = time.time() + timeout
-        while time.time() < end:
-            for sel in selectors:
-                try:
-                    els = driver.find_elements(By.CSS_SELECTOR, sel)
-                    els = [e for e in els if e.is_displayed() and e.is_enabled()]
-                    if els:
-                        driver.execute_script("arguments[0].scrollIntoView({block:'center'});", els[0])
-                        try:
-                            els[0].click()
-                        except Exception:
-                            driver.execute_script("arguments[0].click();", els[0])
-                        return True
-                except Exception:
-                    continue
-            time.sleep(0.2)
-        return False
-
     def _visible_inputs_in_context(driver):
-        """Returns visible+enabled inputs in current context."""
         ins = driver.find_elements(By.CSS_SELECTOR, "input")
         return [i for i in ins if i.is_displayed() and i.is_enabled()]
 
-    def _find_email_input(timeout=15):
-        """Find a visible email/username input in the *current* context."""
-        w = WebDriverWait(driver, timeout)
-        # Prefer type=email
-        try:
-            return w.until(EC.visibility_of_element_located((By.CSS_SELECTOR, "input[type='email']")))
-        except Exception:
-            pass
-        # Common username-ish selectors
-        candidates = driver.find_elements(
-            By.CSS_SELECTOR,
-            "input[type='text'], input[name*='email' i], input[id*='email' i], input[autocomplete='username']",
-        )
-        candidates = [c for c in candidates if c.is_displayed() and c.is_enabled()]
-        return candidates[0] if candidates else None
-
     def _find_password_like_input_anywhere(timeout=30):
-        """
-        Find the password field after Continue.
-        Searches:
-          1) main document (many selectors)
-          2) shadow DOM (if real input exists)
-          3) any iframes (including ones created after Continue)
-        Returns (element, frame_index_or_None). If frame_index is not None,
-        Selenium is left switched into that iframe.
-        """
         selectors = [
             "input[type='password']",
             "input[autocomplete='current-password']",
@@ -670,10 +614,9 @@ def aago_password_login(driver) -> bool:
             "input[aria-label*='pass' i]",
             "input[placeholder*='pass' i]",
             "input[autocomplete='password']",
-
         ]
 
-        # --- 1) Main document: wait for any selector to become visible ---
+        # 1) Main document
         driver.switch_to.default_content()
         w = WebDriverWait(driver, timeout)
         for sel in selectors:
@@ -683,8 +626,7 @@ def aago_password_login(driver) -> bool:
             except Exception:
                 continue
 
-        # --- 2) Shadow DOM: try your helper (only finds input[type=password] normally) ---
-        # If your helper exists, use it as an extra attempt.
+        # 2) Shadow DOM (optional helper)
         try:
             shadow_pass = find_password_in_shadow_dom(driver)
             if shadow_pass:
@@ -692,7 +634,7 @@ def aago_password_login(driver) -> bool:
         except Exception:
             pass
 
-        # --- 3) Iframes: after Continue, iframes may appear dynamically ---
+        # 3) Iframes
         driver.switch_to.default_content()
         iframes = driver.find_elements(By.TAG_NAME, "iframe")
         for i, iframe in enumerate(iframes):
@@ -700,20 +642,15 @@ def aago_password_login(driver) -> bool:
                 driver.switch_to.default_content()
                 driver.switch_to.frame(iframe)
 
-                # Try all selectors in this frame
                 for sel in selectors:
                     els = driver.find_elements(By.CSS_SELECTOR, sel)
                     els = [e for e in els if e.is_displayed() and e.is_enabled()]
                     if els:
                         return els[0], i
 
-                # Fallback: sometimes password is not tagged well; look for any input near "Password"
                 inputs = _visible_inputs_in_context(driver)
-                if inputs:
-                    # Heuristic: if any label-ish text in page contains "password"
-                    if "password" in driver.page_source.lower():
-                        # choose the last visible input (often password comes after email)
-                        return inputs[-1], i
+                if inputs and "password" in driver.page_source.lower():
+                    return inputs[-1], i
 
             except Exception:
                 continue
@@ -722,7 +659,6 @@ def aago_password_login(driver) -> bool:
         raise TimeoutException("No password-like input found in main page, shadow DOM, or any iframe.")
 
     def _fill_input(el, value: str):
-        """Reliable input fill."""
         try:
             driver.execute_script("arguments[0].scrollIntoView({block:'center'});", el)
         except Exception:
@@ -761,13 +697,12 @@ def aago_password_login(driver) -> bool:
         st.write("AAGO URL (login):", driver.current_url)
         st.write("AAGO Title (login):", driver.title)
 
-        # Screenshot initial state
         try:
             st_screenshot(driver, "AAGO login page (Selenium view)")
         except Exception:
             pass
 
-        # Bot/captcha signal detection (non-fatal unless widget visible)
+        # Bot/captcha signal detection
         try:
             _ = st_bot_gate_signals(driver)
             captcha_widgets = driver.find_elements(
@@ -794,24 +729,19 @@ def aago_password_login(driver) -> bool:
         # --------------------------
         # STEP 1: Email + Continue
         # --------------------------
-        # --------------------------
-
         driver.switch_to.default_content()
 
-        # Try to dismiss the "out of date" banner / cookie bars if they steal focus
         try:
             driver.execute_script("window.scrollTo(0, 0);")
             _click_by_text_any(["IGNORE", "CLOSE", "ACCEPT", "ACKNOWLEDGE", "I AGREE", "GOT IT"], timeout=2)
         except Exception:
             pass
 
-        # Find email input across main DOM + iframes
         email_input, email_frame = _find_email_input_anywhere(driver, timeout=20)
         st.write("Email field found in:", "main page" if email_frame is None else f"iframe #{email_frame}")
 
         filled_val = _fill_email_reliably(driver, email_input, email)
 
-        # Prove it worked
         try:
             st_screenshot(driver, "After filling email (verify visible value)")
         except Exception:
@@ -819,46 +749,89 @@ def aago_password_login(driver) -> bool:
 
         st.write("Email value read back:", repr(filled_val))
 
-        # HARD STOP if it didn't stick (prevents clicking Continue with empty email)
         if not filled_val or "@" not in filled_val:
             raise RuntimeError("Email did not populate (value still blank) — cannot proceed.")
 
         # Now click Continue
-        clicked_continue = _click_by_text_any(["CONTINUE", "NEXT"], timeout=2)
+        submitted = False
+        start_url = driver.current_url
 
-        # If we were in an iframe, the Continue button might be outside it
-        if not clicked_continue and email_frame is not None:
-            driver.switch_to.default_content()
-            clicked_continue = _click_by_text_any(["CONTINUE", "NEXT"], timeout=3)
+        # If email input was in an iframe, submit inside that iframe
+        if email_frame is not None:
+            iframes = driver.find_elements(By.TAG_NAME, "iframe")
+            driver.switch_to.frame(iframes[email_frame])
 
-        if not clicked_continue:
-            clicked_continue = _safe_click_any_css(
-                ["button[type='submit']", "input[type='submit']", "button"],
-                timeout=3
+        # Re-find email input in current context
+        try:
+            email_input_current = driver.find_element(
+                By.CSS_SELECTOR,
+                "input[type='email'], input[autocomplete='username'], input[id*='email'], input[name*='email']"
             )
+        except Exception:
+            email_input_current = email_input
 
-        if not clicked_continue:
+        # Try submit via form
+        try:
+            form = email_input_current.find_element(By.XPATH, "ancestor::form[1]")
+            driver.execute_script(
+                "arguments[0].requestSubmit ? arguments[0].requestSubmit() : arguments[0].submit();",
+                form
+            )
+            submitted = True
+            st.write("Continue: submitted email form via JS")
+        except Exception as e:
+            st.write("Continue: JS submit failed:", str(e))
+
+        # If still not submitted, try clicking submit button inside form
+        if not submitted:
             try:
-                email_input.send_keys(Keys.ENTER)
+                btn = email_input_current.find_element(
+                    By.XPATH,
+                    "ancestor::form[1]//button[@type='submit'] | ancestor::form[1]//input[@type='submit']"
+                )
+                driver.execute_script("arguments[0].click();", btn)
+                submitted = True
+                st.write("Continue: clicked form submit button")
             except Exception:
                 pass
 
+        # Always go back to default content after submit attempt
         driver.switch_to.default_content()
 
-        # Wait for password step to *actually* render (avoid fixed sleeps only)
-        # This also helps when the password step is an iframe created after Continue.
+        # Try clicking by text
+        if not submitted:
+            clicked_continue = _click_by_text_any(["CONTINUE", "NEXT"], timeout=3)
+            st.write("Continue: clicked by text =", clicked_continue)
+            submitted = clicked_continue
+
+        # Last resort: ENTER
+        if not submitted:
+            try:
+                email_input.send_keys(Keys.ENTER)
+                st.write("Continue: ENTER key sent")
+                submitted = True
+            except Exception:
+                pass
+
+        st.write("URL after Continue attempt:", driver.current_url)
+        st.write("Title after Continue attempt:", driver.title)
         try:
-            WebDriverWait(driver, 15).until(
+            st_screenshot(driver, "After Continue attempt (immediate)")
+        except Exception:
+            pass
+
+        # Wait for password step
+        try:
+            WebDriverWait(driver, 20).until(
                 lambda d: (
                     "password" in d.page_source.lower()
-                    or len(d.find_elements(By.CSS_SELECTOR, "input[type='password'], input[autocomplete='current-password']")) > 0
-                    or len(d.find_elements(By.TAG_NAME, "iframe")) > 0
+                    or d.find_elements(By.CSS_SELECTOR, "input[type='password'], input[autocomplete='current-password'], input[autocomplete='password']")
+                    or d.current_url != start_url
                 )
             )
         except Exception:
             pass
 
-        # Debug screenshot right after Continue (critical)
         try:
             st_screenshot(driver, "After clicking Continue (before password search)")
         except Exception:
@@ -870,7 +843,6 @@ def aago_password_login(driver) -> bool:
         pass_input, frame_index = _find_password_like_input_anywhere(timeout=30)
         st.write("Password field found in:", "main page" if frame_index is None else f"iframe #{frame_index}")
 
-        # Make sure it is interactable
         try:
             WebDriverWait(driver, 10).until(lambda d: pass_input.is_displayed() and pass_input.is_enabled())
         except Exception:
@@ -878,7 +850,6 @@ def aago_password_login(driver) -> bool:
 
         _fill_input(pass_input, password)
 
-        # Submit: prefer within the same form first
         submitted = False
         try:
             form = pass_input.find_element(By.XPATH, "ancestor::form[1]")
@@ -894,17 +865,14 @@ def aago_password_login(driver) -> bool:
             pass
 
         if not submitted:
-            # Try explicit button text
             submitted = _click_by_text_any(["SIGN IN", "LOG IN", "SUBMIT"], timeout=4)
 
         if not submitted:
-            # Last resort ENTER
             try:
                 pass_input.send_keys(Keys.ENTER)
             except Exception:
                 pass
 
-        # Confirm navigation / auth
         time.sleep(2.0)
         driver.switch_to.default_content()
 
@@ -916,11 +884,9 @@ def aago_password_login(driver) -> bool:
         except Exception:
             pass
 
-        # If still on login, show possible error text
         if "login" in driver.current_url.lower():
             st.error("Still on login page after password submit.")
             try:
-                # surface likely error messages
                 errs = driver.find_elements(By.CSS_SELECTOR, ".error, .alert, .message, .validation-summary-errors")
                 msgs = [e.text.strip() for e in errs if e.is_displayed() and e.text.strip()]
                 if msgs:
@@ -960,6 +926,7 @@ def aago_password_login(driver) -> bool:
             pass
         st.code(driver.page_source[:2500])
         return False
+
 
 
 
