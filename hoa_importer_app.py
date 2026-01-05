@@ -729,14 +729,17 @@ def aago_password_login(driver) -> bool:
         # --------------------------
         # STEP 1: Email + Continue
         # --------------------------
+
         driver.switch_to.default_content()
 
+        # Try to dismiss banners that steal focus
         try:
             driver.execute_script("window.scrollTo(0, 0);")
             _click_by_text_any(["IGNORE", "CLOSE", "ACCEPT", "ACKNOWLEDGE", "I AGREE", "GOT IT"], timeout=2)
         except Exception:
             pass
 
+        # Find + fill email (may be in iframe)
         email_input, email_frame = _find_email_input_anywhere(driver, timeout=20)
         st.write("Email field found in:", "main page" if email_frame is None else f"iframe #{email_frame}")
 
@@ -749,93 +752,89 @@ def aago_password_login(driver) -> bool:
 
         st.write("Email value read back:", repr(filled_val))
 
+        # HARD STOP if it didn't stick
         if not filled_val or "@" not in filled_val:
             raise RuntimeError("Email did not populate (value still blank) — cannot proceed.")
 
-        # Now click Continue
-        submitted = False
+        # --------------------------
+        # CLICK THE REAL CONTINUE BUTTON (type='button', not a form submit)
+        # --------------------------
         start_url = driver.current_url
 
-        # If email input was in an iframe, submit inside that iframe
+        # Ensure we're in the same context as the email input when clicking Continue
+        driver.switch_to.default_content()
         if email_frame is not None:
             iframes = driver.find_elements(By.TAG_NAME, "iframe")
-            driver.switch_to.frame(iframes[email_frame])
+            if 0 <= email_frame < len(iframes):
+                driver.switch_to.frame(iframes[email_frame])
 
-        # Re-find email input in current context
+        # Click the specific AAGO Continue button
         try:
-            email_input_current = driver.find_element(
-                By.CSS_SELECTOR,
-                "input[type='email'], input[autocomplete='username'], input[id*='email'], input[name*='email']"
+            continue_btn = WebDriverWait(driver, 10).until(
+                EC.element_to_be_clickable((By.CSS_SELECTOR, "button.c-login-form__continue-button"))
             )
-        except Exception:
-            email_input_current = email_input
-
-        # Try submit via form
-        try:
-            form = email_input_current.find_element(By.XPATH, "ancestor::form[1]")
-            driver.execute_script(
-                "arguments[0].requestSubmit ? arguments[0].requestSubmit() : arguments[0].submit();",
-                form
-            )
-            submitted = True
-            st.write("Continue: submitted email form via JS")
+            driver.execute_script("arguments[0].scrollIntoView({block:'center'});", continue_btn)
+            driver.execute_script("arguments[0].click();", continue_btn)
+            st.write("Continue: clicked .c-login-form__continue-button")
         except Exception as e:
-            st.write("Continue: JS submit failed:", str(e))
-
-        # If still not submitted, try clicking submit button inside form
-        if not submitted:
+            st.write("Continue: failed clicking .c-login-form__continue-button:", str(e))
+            # fallback: try by visible text in the current context
             try:
-                btn = email_input_current.find_element(
-                    By.XPATH,
-                    "ancestor::form[1]//button[@type='submit'] | ancestor::form[1]//input[@type='submit']"
-                )
-                driver.execute_script("arguments[0].click();", btn)
-                submitted = True
-                st.write("Continue: clicked form submit button")
+                clicked = _click_by_text_any(["CONTINUE", "NEXT"], timeout=3)
+                st.write("Continue: fallback clicked by text =", clicked)
             except Exception:
                 pass
 
-        # Always go back to default content after submit attempt
+        # Always return to default content for subsequent checks/screenshots
         driver.switch_to.default_content()
 
-        # Try clicking by text
-        if not submitted:
-            clicked_continue = _click_by_text_any(["CONTINUE", "NEXT"], timeout=3)
-            st.write("Continue: clicked by text =", clicked_continue)
-            submitted = clicked_continue
-
-        # Last resort: ENTER
-        if not submitted:
-            try:
-                email_input.send_keys(Keys.ENTER)
-                st.write("Continue: ENTER key sent")
-                submitted = True
-            except Exception:
-                pass
-
-        st.write("URL after Continue attempt:", driver.current_url)
-        st.write("Title after Continue attempt:", driver.title)
+        time.sleep(1)
+        st.write("URL after Continue:", driver.current_url)
+        st.write("Title after Continue:", driver.title)
         try:
-            st_screenshot(driver, "After Continue attempt (immediate)")
+            st_screenshot(driver, "After Continue (immediate)")
         except Exception:
             pass
 
-        # Wait for password step
+        # --------------------------
+        # Wait for next step (AJAX may keep you on /login)
+        # --------------------------
+        def _next_step_ready(d):
+            html = d.page_source.lower()
+
+            # password inputs appear
+            if d.find_elements(By.CSS_SELECTOR, "input[type='password'], input[autocomplete='current-password'], input[autocomplete='password']"):
+                return True
+
+            # or page contains password-related UI text
+            if "password" in html:
+                return True
+
+            # or AAGO shows other next-step states
+            if "set password" in html:
+                return True
+            if "try again" in html:
+                return True
+            if "create account" in html:
+                return True
+
+            # or you navigated away
+            if d.current_url != start_url:
+                return True
+
+            return False
+
         try:
-            WebDriverWait(driver, 20).until(
-                lambda d: (
-                    "password" in d.page_source.lower()
-                    or d.find_elements(By.CSS_SELECTOR, "input[type='password'], input[autocomplete='current-password'], input[autocomplete='password']")
-                    or d.current_url != start_url
-                )
-            )
+           WebDriverWait(driver, 20).until(_next_step_ready)
         except Exception:
             pass
 
         try:
-            st_screenshot(driver, "After clicking Continue (before password search)")
+            st_screenshot(driver, "After Continue (before password search)")
         except Exception:
             pass
+
+        
 
         # --------------------------
         # STEP 2: Password + submit
